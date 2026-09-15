@@ -1,0 +1,11 @@
+pydantic==2.10.4
+pydantic-settings==2.7.0
+httpx==0.28.1
+boto3==1.35.90
+psutil==6.1.1
+python-dotenv==1.0.1
+playwright==1.49.1
+
+# Windows-only. Environment markers keep installs working on macOS/Linux.
+pywin32==308; sys_platform == "win32"
+pywinauto==0.6.8; sys_platform == "win32"
