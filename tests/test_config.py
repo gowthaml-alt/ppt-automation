@@ -14,8 +14,19 @@ def _base(**overrides):
     return values
 
 
-def test_defaults_are_safe():
-    s = Settings(**_base())
+def test_defaults_are_safe(monkeypatch):
+    # Local laptop .env (ISPRING_ADAPTER=fake) must not change code defaults.
+    for key in (
+        "ISPRING_ADAPTER",
+        "STORAGE_BACKEND",
+        "KEEP_FAILED_JOB_FILES",
+        "POLL_INTERVAL_SECONDS",
+        "MAX_PPT_SIZE_MB",
+        "DOWNLOAD_ALLOWED_HOSTS",
+        "BACKEND_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings(_env_file=None, **_base())
     assert s.ispring_adapter == "not_configured"
     assert s.storage_backend == "local_fs"
     assert s.keep_failed_job_files is False
