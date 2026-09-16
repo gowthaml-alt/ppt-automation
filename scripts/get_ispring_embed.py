@@ -314,6 +314,91 @@ def toggle_candidates(page):
     return found
 
 
+def press_space_on(locator, page, what: str) -> bool:
+    """Focus the control and press Space.
+
+    A real checkbox toggles itself on Space and fires its change event, so
+    this works even when the input is invisible under a styled switch.
+    """
+    try:
+        locator.focus()
+        page.keyboard.press("Space")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def js_click(locator, what: str) -> bool:
+    """Call .click() on the element inside the page.
+
+    Unlike a mouse click this ignores whatever is drawn on top, and unlike
+    dispatch_event it also performs the checkbox's own default action.
+    """
+    try:
+        locator.evaluate("el => el.click()")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def click_switch_beside_off(page) -> bool:
+    """Click the visible switch, found by the word 'Off' printed next to it.
+
+    The switch itself has no name or role we can match, but the state label
+    beside it does, and the switch sits just to its right on the same line.
+    """
+    label_box = None
+    for frame in _frames(page):
+        label = visible_or_none(frame.get_by_text(PUBLIC_TOGGLE_RE))
+        if label is None:
+            continue
+        try:
+            label_box = label.bounding_box()
+        except Exception:  # noqa: BLE001
+            label_box = None
+        if label_box:
+            break
+    if not label_box:
+        return False
+    row_middle = label_box["y"] + label_box["height"] / 2
+
+    best = None
+    for frame in _frames(page):
+        locator = frame.get_by_text(re.compile(r"^\s*off\s*$", re.I))
+        try:
+            count = locator.count()
+        except Exception:  # noqa: BLE001
+            continue
+        for index in range(min(count, 6)):
+            item = locator.nth(index)
+            try:
+                if not item.is_visible():
+                    continue
+                box = item.bounding_box() or {}
+            except Exception:  # noqa: BLE001
+                continue
+            middle = box.get("y", 0) + box.get("height", 0) / 2
+            gap = abs(middle - row_middle)
+            if gap < 40 and (best is None or gap < best[0]):
+                best = (gap, box)
+    if best is None:
+        return False
+
+    box = best[1]
+    y = box["y"] + box["height"] / 2
+    for offset in (30, 45, 60, 20, 75):
+        x = box["x"] + box["width"] + offset
+        try:
+            page.mouse.click(x, y)
+            page.wait_for_timeout(1500)
+        except Exception:  # noqa: BLE001
+            continue
+        if is_public(page):
+            print(f"[ok  ] clicked the switch {offset}px right of 'Off'")
+            return True
+    return False
+
+
 def make_viewable_via_link(page, artifacts) -> bool:
     """Turn on 'Make viewable via link' and prove it went on.
 
@@ -326,6 +411,22 @@ def make_viewable_via_link(page, artifacts) -> bool:
         return True
 
     for round_number in range(1, 4):
+        # Keyboard and in-page click first: neither cares what is drawn on top.
+        for candidate in toggle_candidates(page):
+            for how, action in (
+                ("space", lambda c=candidate: press_space_on(c, page, "toggle")),
+                ("js click", lambda c=candidate: js_click(c, "toggle")),
+            ):
+                if not action():
+                    continue
+                page.wait_for_timeout(2000)
+                if is_public(page):
+                    print(f"[ok  ] turned on 'Make viewable via link' ({how})")
+                    return True
+
+        if click_switch_beside_off(page) and is_public(page):
+            return True
+
         for candidate in toggle_candidates(page):
             for depth, target in enumerate(ancestors(candidate)):
                 try:
@@ -337,7 +438,7 @@ def make_viewable_via_link(page, artifacts) -> bool:
                     continue
                 page.wait_for_timeout(2000)
                 if is_public(page):
-                    print("[ok  ] turned on 'Make viewable via link'")
+                    print("[ok  ] turned on 'Make viewable via link' (wrapper)")
                     return True
         # The word next to the switch is clickable in some builds.
         for frame in _frames(page):
