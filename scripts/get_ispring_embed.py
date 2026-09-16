@@ -195,6 +195,141 @@ def copy_button_fallback(page) -> str:
         return ""
 
 
+def report_embed(embed: str) -> int:
+    if not embed:
+        print("\nEMBED NOT FOUND")
+        return 1
+    print("\nEMBED OK")
+    print(f"embed_code={embed}")
+    src = SRC_RE.search(embed)
+    if src:
+        print(f"iframe_url={src.group(1)}")
+    return 0
+
+
+def looks_logged_out(page) -> bool:
+    try:
+        from browser_test.ispring_cloud import _visible_text, looks_like_login
+
+        return looks_like_login(page.url, _visible_text(page))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def pick_ispring_page(context, use_open_tab: bool):
+    """Find the iSpring tab in an already-running browser.
+
+    The tab opened by 'Manage Content' is usually the last one, and it is
+    already on the right material, so prefer the newest match.
+    """
+    matches = []
+    for page in context.pages:
+        try:
+            url = page.url or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if "ispring" in url.lower():
+            matches.append(page)
+    if matches:
+        return matches[-1]
+    if use_open_tab:
+        return None
+    return context.new_page()
+
+
+def share_flow(page, context, material: str, institution: str, artifacts) -> str:
+    """The part that is the same whether we launched Chrome or attached to it."""
+    wait_for_app_ready(page)
+    dismiss_cookie_dialogs(page)
+    _save_screenshot(page, artifacts, "01-library")
+
+    if not wait_for_visible_text(page, name_pattern(material), 6_000):
+        search_library(page, material)
+        page = active_page(context, page)
+        wait_for_app_ready(page, timeout_ms=20_000)
+    if not wait_for_visible_text(page, name_pattern(material), 15_000):
+        if institution:
+            search_library(page, institution)
+            wait_for_app_ready(page, timeout_ms=20_000)
+            search_library(page, material)
+            wait_for_app_ready(page, timeout_ms=20_000)
+    _save_screenshot(page, artifacts, "02-material-found")
+    _dump_page(page, artifacts, "02-material-found")
+
+    if not open_row_menu(page, material):
+        _dump_page(page, artifacts, "03-no-row-menu")
+        raise ISpringCloudProbeError(
+            f"could not find the three-dot menu for {material!r}"
+        )
+    page.wait_for_timeout(1200)
+    _save_screenshot(page, artifacts, "03-row-menu")
+
+    if not click_by_role(page, SHARE_RE, what="Share"):
+        _dump_page(page, artifacts, "04-no-share")
+        raise ISpringCloudProbeError("no Share item in the menu")
+    page.wait_for_timeout(2000)
+    _save_screenshot(page, artifacts, "04-share-dialog")
+    _dump_page(page, artifacts, "04-share-dialog")
+
+    click_by_role(page, EMBED_RE, roles=("tab", "button", "link"), what="Embed")
+    page.wait_for_timeout(1500)
+    _save_screenshot(page, artifacts, "05-embed")
+    _dump_page(page, artifacts, "05-embed")
+
+    embed = read_embed_code(page)
+    if not embed:
+        print("[FAIL] no iframe in the page text; trying the Copy button")
+        embed = copy_button_fallback(page)
+    return embed
+
+
+def fetch_embed_over_cdp(
+    material: str,
+    institution: str = "",
+    *,
+    cdp: str = "http://127.0.0.1:9222",
+    use_open_tab: bool = True,
+    artifacts_dir: str | Path = "",
+) -> str:
+    """Drive the Chrome that is already running and already signed in.
+
+    Nothing is launched and no profile is created, so the login that was done
+    once by hand in that Chrome keeps working for every run after it.
+    """
+    from playwright.sync_api import sync_playwright
+
+    artifacts = ArtifactRun.create(
+        Path(artifacts_dir or (ROOT / "test-artifacts" / "ispring-embed"))
+    )
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.connect_over_cdp(cdp)
+        except Exception as exc:  # noqa: BLE001
+            raise ISpringCloudProbeError(
+                f"could not attach to Chrome at {cdp}: {exc}. Start Chrome with "
+                '--remote-debugging-port=9222 (see scripts\\start_ispring_chrome.cmd).'
+            ) from exc
+        contexts = browser.contexts
+        if not contexts:
+            raise ISpringCloudProbeError("attached to Chrome but it has no windows open")
+        context = contexts[0]
+        page = pick_ispring_page(context, use_open_tab)
+        if page is None:
+            raise ISpringCloudProbeError(
+                "no iSpring tab is open in that Chrome. Publish first so "
+                "'Manage Content' opens one, or drop --use-open-tab."
+            )
+        page.bring_to_front()
+        if looks_logged_out(page):
+            raise ISpringCloudProbeError(
+                "that Chrome is not signed in to iSpring Cloud. Sign in once by "
+                "hand in this browser; the session is then reused every run."
+            )
+        embed = share_flow(page, context, material, institution, artifacts)
+        print(f"artifacts={artifacts.root}")
+        return embed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Read the embed iframe for a published material."
@@ -213,6 +348,20 @@ def main(argv: list[str] | None = None) -> int:
         "--profile-dir", default=str(ROOT / "test-artifacts" / "chrome-profile")
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--cdp",
+        default="http://127.0.0.1:9222",
+        help=(
+            "Attach to a running Chrome at this debug address instead of "
+            "launching one. This is what avoids logging in every time. "
+            "Pass an empty string to launch a separate Chrome instead."
+        ),
+    )
+    parser.add_argument(
+        "--use-open-tab",
+        action="store_true",
+        help="Use the iSpring tab already open (the one Manage Content opened)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -221,6 +370,27 @@ def main(argv: list[str] | None = None) -> int:
         print("playwright is not installed: pip install -r requirements.txt", file=sys.stderr)
         return 2
 
+    if args.cdp:
+        try:
+            embed = fetch_embed_over_cdp(
+                args.material,
+                args.institution,
+                cdp=args.cdp,
+                use_open_tab=args.use_open_tab,
+                artifacts_dir=args.artifacts_dir,
+            )
+        except ISpringCloudProbeError as exc:
+            print(f"\nEMBED FAILED: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"\nEMBED FAILED (unexpected): {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        return report_embed(embed)
+
+    # Fallback: launch our own Chrome with a saved profile (needs one login).
     artifacts = ArtifactRun.create(Path(args.artifacts_dir))
     supplied = login_credentials(os.environ)
     email = supplied[0] if supplied else None
@@ -239,55 +409,16 @@ def main(argv: list[str] | None = None) -> int:
                 page, None if supplied else input, email=email, password=password
             )
             page = open_cloud_library(context, page)
-            wait_for_app_ready(page)
-            dismiss_cookie_dialogs(page)
-            _save_screenshot(page, artifacts, "01-library")
-
-            query = args.material
-            if not wait_for_visible_text(page, name_pattern(args.material), 6_000):
-                search_library(page, query)
-                page = active_page(context, page)
-                wait_for_app_ready(page, timeout_ms=20_000)
-            if not wait_for_visible_text(page, name_pattern(args.material), 15_000):
-                if args.institution:
-                    search_library(page, args.institution)
-                    wait_for_app_ready(page, timeout_ms=20_000)
-                    search_library(page, args.material)
-                    wait_for_app_ready(page, timeout_ms=20_000)
-            _save_screenshot(page, artifacts, "02-material-found")
-            _dump_page(page, artifacts, "02-material-found")
-
-            if not open_row_menu(page, args.material):
-                _dump_page(page, artifacts, "03-no-row-menu")
-                raise ISpringCloudProbeError(
-                    f"could not find the three-dot menu for {args.material!r}"
-                )
-            page.wait_for_timeout(1200)
-            _save_screenshot(page, artifacts, "03-row-menu")
-
-            if not click_by_role(page, SHARE_RE, what="Share"):
-                _dump_page(page, artifacts, "04-no-share")
-                raise ISpringCloudProbeError("no Share item in the menu")
-            page.wait_for_timeout(2000)
-            _save_screenshot(page, artifacts, "04-share-dialog")
-            _dump_page(page, artifacts, "04-share-dialog")
-
-            # The embed code may be behind a tab or an expander.
-            click_by_role(page, EMBED_RE, roles=("tab", "button", "link"), what="Embed")
-            page.wait_for_timeout(1500)
-            _save_screenshot(page, artifacts, "05-embed")
-            _dump_page(page, artifacts, "05-embed")
-
-            embed = read_embed_code(page)
-            if not embed:
-                print("[FAIL] no iframe in the page text; trying the Copy button")
-                embed = copy_button_fallback(page)
+            embed = share_flow(page, context, args.material, args.institution, artifacts)
         except ISpringCloudProbeError as exc:
             print(f"\nEMBED FAILED: {exc}", file=sys.stderr)
             print(f"artifacts={artifacts.root}", file=sys.stderr)
             return 1
         except Exception as exc:  # noqa: BLE001
-            print(f"\nEMBED FAILED (unexpected): {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(
+                f"\nEMBED FAILED (unexpected): {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
             print(f"artifacts={artifacts.root}", file=sys.stderr)
             return 1
         finally:
@@ -296,18 +427,8 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:  # noqa: BLE001
                 pass
 
-    if not embed:
-        print("\nEMBED NOT FOUND")
-        print(f"artifacts={artifacts.root}")
-        return 1
-
-    print("\nEMBED OK")
-    print(f"embed_code={embed}")
-    src = SRC_RE.search(embed)
-    if src:
-        print(f"iframe_url={src.group(1)}")
     print(f"artifacts={artifacts.root}")
-    return 0
+    return report_embed(embed)
 
 
 if __name__ == "__main__":

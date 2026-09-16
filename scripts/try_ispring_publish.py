@@ -491,6 +491,45 @@ def wait_for_completion(window, report: Report, timeout_s: float) -> None:
     raise PublishError(f"publish did not finish within {timeout_s}s (last status: {last_status!r})")
 
 
+def click_manage_content(window, report: Report) -> bool:
+    """Press Manage Content, which opens the material in the default browser."""
+    buttons = by_auto_id(window, ID_DONE_MANAGE)
+    if not buttons:
+        report.add("no Manage Content button", "nothing to press", ok=False)
+        return False
+    try:
+        activate(buttons[0], report, "Manage Content")
+        return True
+    except PublishError as exc:
+        report.add("could not press Manage Content", str(exc), ok=False)
+        return False
+
+
+def embed_from_running_chrome(
+    content_name: str, institution: str, cdp: str, report: Report
+) -> str:
+    """Ask the already-signed-in Chrome for the embed code.
+
+    Attaching to the running browser is what removes the repeated login: the
+    session lives in that Chrome, not in a profile we create.
+    """
+    try:
+        from get_ispring_embed import fetch_embed_over_cdp  # type: ignore
+    except ImportError as exc:  # noqa: BLE001
+        report.add("embed step unavailable", str(exc), ok=False)
+        return ""
+    try:
+        embed = fetch_embed_over_cdp(
+            content_name, institution, cdp=cdp, use_open_tab=True
+        )
+    except Exception as exc:  # noqa: BLE001
+        report.add("embed step failed", f"{type(exc).__name__}: {exc}", ok=False)
+        return ""
+    if embed:
+        report.add("embed code", embed[:120] + ("…" if len(embed) > 120 else ""))
+    return embed
+
+
 def read_link_from_browser(window, report: Report, timeout_s: float = 90) -> str:
     """Click 'Manage Content' and read the URL the browser lands on.
 
@@ -562,6 +601,19 @@ def main(argv: list[str] | None = None) -> int:
         "--get-link",
         action="store_true",
         help="After publishing, press Manage Content and read the browser's URL",
+    )
+    parser.add_argument(
+        "--embed-after",
+        action="store_true",
+        help=(
+            "After publishing, press Manage Content and then drive that same "
+            "signed-in Chrome to Share > Embed and print the iframe"
+        ),
+    )
+    parser.add_argument(
+        "--cdp",
+        default="http://127.0.0.1:9222",
+        help="Debug address of the running Chrome to attach to",
     )
     parser.add_argument("--content-name", default="", help="Content name to set")
     parser.add_argument(
@@ -638,7 +690,19 @@ def main(argv: list[str] | None = None) -> int:
         activate(publish, report, "Publish")
         wait_for_completion(window, report, args.timeout)
         report.add("elapsed", f"{time.monotonic() - started:.0f}s")
-        if args.get_link:
+        if args.embed_after:
+            if click_manage_content(window, report):
+                time.sleep(10)  # let the browser open and settle
+                embed = embed_from_running_chrome(
+                    args.content_name or args.institution,
+                    args.institution,
+                    args.cdp,
+                    report,
+                )
+                if embed:
+                    match = re.search(r"""\bsrc\s*=\s*["']([^"']+)["']""", embed)
+                    link = match.group(1) if match else embed
+        elif args.get_link:
             link = read_link_from_browser(window, report)
         close_finished_dialogs(window, report)
     except PublishError as exc:
@@ -650,9 +714,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\nPUBLISH OK")
     if link:
-        print(f"link={link}")
-    elif args.get_link:
-        print("link= (not found — see the FAIL lines above)")
+        print(f"iframe_url={link}")
+    elif args.get_link or args.embed_after:
+        print("iframe_url= (not found — see the FAIL lines above)")
     return 0
 
 
