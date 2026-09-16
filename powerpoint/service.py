@@ -24,6 +24,7 @@ USER_PROTECTED_VIEW = "PowerPoint opened the file in Protected View."
 USER_DAMAGED = "The PowerPoint file is damaged and could not be opened."
 USER_OPEN_TIMEOUT = "Opening the PowerPoint file timed out."
 USER_SAVE_FAILED = "The repaired PowerPoint file could not be saved."
+PP_SAVE_AS_OPEN_XML_PRESENTATION = 24
 
 
 def terminate_powerpoint_processes() -> int:
@@ -103,7 +104,6 @@ class PowerPointService:
         )
         self._open_cleanup_done = False
         repair_attempted = False
-        saved = False
         timed_out = threading.Event()
         done = threading.Event()
         logged_result: dict[str, str | None] = {"open_result": None}
@@ -161,19 +161,7 @@ class PowerPointService:
                     user_message=USER_OPEN_TIMEOUT,
                 )
             self._reject_protected_view()
-            if self._presentation is not None and not bool(
-                getattr(self._presentation, "Saved", True)
-            ):
-                try:
-                    self._presentation.Save()
-                    saved = True
-                except Exception as exc:
-                    log_open("save_failed")
-                    self._cleanup_failed_open()
-                    raise PowerPointAutomationError(
-                        f"Save after repair failed: {exc}",
-                        user_message=USER_SAVE_FAILED,
-                    ) from exc
+            saved = self._save_repaired_if_needed(resolved)
             if timed_out.is_set():
                 raise PowerPointAutomationError(
                     f"Open2007 exceeded {limit}s",
@@ -260,6 +248,36 @@ class PowerPointService:
             user_message=USER_PROTECTED_VIEW,
         )
 
+    def _save_repaired_if_needed(self, dest: Path) -> bool:
+        presentation = self._presentation
+        if presentation is None or bool(getattr(presentation, "Saved", True)):
+            return False
+        try:
+            presentation.ReadOnlyRecommended = False
+        except Exception:
+            pass
+        try:
+            presentation.Save()
+            return True
+        except Exception as exc:
+            if not _is_readonly_save_error(exc):
+                raise PowerPointAutomationError(
+                    f"Save after repair failed: {exc}",
+                    user_message=USER_SAVE_FAILED,
+                ) from exc
+            logger.info(
+                "Save was read-only; writing working copy with SaveAs",
+                extra={"stage": "powerpoint_open"},
+            )
+        try:
+            presentation.SaveAs(str(dest), PP_SAVE_AS_OPEN_XML_PRESENTATION)
+            return True
+        except Exception as exc:
+            raise PowerPointAutomationError(
+                f"SaveAs after repair failed: {exc}",
+                user_message=USER_SAVE_FAILED,
+            ) from exc
+
     def _cleanup_failed_open(self) -> None:
         if self._open_cleanup_done:
             return
@@ -305,6 +323,11 @@ def _result_for_user_message(user_message: str | None) -> str:
         USER_SAVE_FAILED: "save_failed",
     }
     return mapping.get(user_message or "", "damaged")
+
+
+def _is_readonly_save_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "read-only" in text or "different name" in text
 
 
 def _is_password_error(exc: BaseException) -> bool:

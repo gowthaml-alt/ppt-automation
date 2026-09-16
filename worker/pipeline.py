@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import stat
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -167,6 +170,7 @@ class Pipeline:
                 f"could not create working copy: {exc}",
                 user_message=USER_DAMAGED,
             ) from exc
+        _make_writable_copy(paths.working_pptx)
         return paths.working_pptx
 
     def _safe_close_powerpoint(self) -> None:
@@ -199,3 +203,28 @@ class Pipeline:
             )
         if self._slack is not None:
             self._slack.notify_failure(job, stage=str(stage), error_message=message)
+
+
+def _make_writable_copy(path: Path) -> None:
+    """Drop read-only bits and Mark-of-the-Web so PowerPoint can SaveAs."""
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE | stat.S_IWUSR)
+    except OSError:
+        logger.warning(
+            "could not clear read-only flag on working copy",
+            extra={"stage": "powerpoint_open"},
+            exc_info=True,
+        )
+    if sys.platform != "win32":
+        return
+    ads = f"{path}:Zone.Identifier"
+    try:
+        os.remove(ads)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning(
+            "could not remove Zone.Identifier from working copy",
+            extra={"stage": "powerpoint_open"},
+            exc_info=True,
+        )

@@ -47,11 +47,20 @@ class FakeProtectedViewWindows:
 
 
 class FakePresentation:
-    def __init__(self, path: Path, *, saved: bool = True, save_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        saved: bool = True,
+        save_error: Exception | None = None,
+        save_as_error: Exception | None = None,
+    ) -> None:
         self.FullName = str(path)
         self.Saved = saved
         self.save_error = save_error
+        self.save_as_error = save_as_error
         self.save_calls = 0
+        self.save_as_calls: list[tuple[str, int]] = []
         self.closed = 0
 
     def Save(self) -> None:
@@ -59,6 +68,14 @@ class FakePresentation:
         if self.save_error is not None:
             raise self.save_error
         Path(self.FullName).write_bytes(b"repaired-working-copy")
+        self.Saved = True
+
+    def SaveAs(self, FileName, FileFormat=24):
+        self.save_as_calls.append((str(FileName), int(FileFormat)))
+        if self.save_as_error is not None:
+            raise self.save_as_error
+        Path(FileName).write_bytes(b"repaired-working-copy")
+        self.FullName = str(FileName)
         self.Saved = True
 
     def Close(self) -> None:
@@ -183,6 +200,33 @@ def test_repairable_file_is_saved_to_working_copy_only(tmp_path, caplog):
     assert presentation.save_calls == 1
     assert working.read_bytes() == b"repaired-working-copy"
     assert original.read_bytes() == original_bytes
+    records = [r for r in caplog.records if getattr(r, "open_result", None)]
+    assert records[-1].saved is True
+    assert records[-1].open_result == "success"
+
+
+def test_readonly_repair_is_saved_as_working_copy(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    original = tmp_path / "input" / "source.pptx"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(minimal_pptx_bytes())
+    working = _working_pptx(tmp_path)
+    original_bytes = original.read_bytes()
+    presentation = FakePresentation(
+        working,
+        saved=False,
+        save_error=RuntimeError(
+            "Presentation.Save : This presentation is read-only and must be "
+            "saved with a different name."
+        ),
+    )
+    killed: list[int] = []
+    _service(tmp_path, FakeApp(FakePresentations(presentation)), killed).open(working)
+    assert presentation.save_calls == 1
+    assert presentation.save_as_calls == [(str(working.resolve()), 24)]
+    assert working.read_bytes() == b"repaired-working-copy"
+    assert original.read_bytes() == original_bytes
+    assert killed == []
     records = [r for r in caplog.records if getattr(r, "open_result", None)]
     assert records[-1].saved is True
     assert records[-1].open_result == "success"
