@@ -55,6 +55,17 @@ TITLE_WORDS = ("ispring", "publish", "powerpoint")
 
 MAX_LINES_PER_WINDOW = 4000
 
+# Embedded browser panes hold hundreds of rows of web content (the project
+# picker lists every account). Their innards are not automatable anyway.
+WEB_VIEW_CLASSES = (
+    "internet explorer_server",
+    "shell embedding",
+    "shell docobject view",
+    "chrome_renderwidget",
+    "chrome_widgetwin",
+    "atlaxwinlic",
+)
+
 
 def _process_name(pid: int) -> str:
     try:
@@ -90,20 +101,31 @@ def _describe(element) -> str:
     return "  ".join(parts)
 
 
-def _walk(element, depth: int, max_depth: int, lines: list[str]) -> None:
+def _walk(
+    element,
+    depth: int,
+    max_depth: int,
+    lines: list[str],
+    skip_web_views: bool = True,
+) -> None:
     """Depth-first walk of the UIA tree. Version-proof: uses element_info only."""
     if len(lines) >= MAX_LINES_PER_WINDOW:
         return
     lines.append("    " + ("  " * depth) + _describe(element))
     if depth >= max_depth:
         return
+    if skip_web_views:
+        class_name = _text(getattr(element, "class_name", "")).lower()
+        if any(marker in class_name for marker in WEB_VIEW_CLASSES):
+            lines.append("    " + ("  " * (depth + 1)) + "<web view content skipped>")
+            return
     try:
         children = element.children()
     except Exception as exc:  # noqa: BLE001
         lines.append("    " + ("  " * (depth + 1)) + f"<children failed: {exc}>")
         return
     for child in children:
-        _walk(child, depth + 1, max_depth, lines)
+        _walk(child, depth + 1, max_depth, lines, skip_web_views)
         if len(lines) >= MAX_LINES_PER_WINDOW:
             lines.append("    <truncated: raise --depth carefully or narrow --only>")
             return
@@ -137,6 +159,26 @@ def main(argv: list[str] | None = None) -> int:
             "probe, then switch to PowerPoint and open the window you want dumped."
         ),
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help=(
+            "Take this many snapshots, so one run can follow a publish from "
+            "start to finish. All snapshots go in the same file."
+        ),
+    )
+    parser.add_argument(
+        "--every",
+        type=int,
+        default=15,
+        help="Seconds between snapshots when --repeat is used (default 15)",
+    )
+    parser.add_argument(
+        "--include-webviews",
+        action="store_true",
+        help="Also walk inside embedded browser panes (very long output)",
+    )
     args = parser.parse_args(argv)
 
     if sys.platform != "win32":
@@ -152,25 +194,55 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    if args.wait > 0:
-        import time
+    import time
 
-        print(
-            f"Waiting {args.wait}s. Switch to PowerPoint now and open the window "
-            "you want dumped."
-        )
-        for remaining in range(args.wait, 0, -1):
+    def countdown(seconds: int, message: str) -> None:
+        if seconds <= 0:
+            return
+        print(message)
+        for remaining in range(seconds, 0, -1):
             print(f"  {remaining:>3}s ", end="\r", flush=True)
             time.sleep(1)
         print("Reading the screen now.      ")
 
+    countdown(
+        args.wait,
+        f"Waiting {args.wait}s. Switch to PowerPoint now and open the window "
+        "you want dumped.",
+    )
+
     own_pid = os.getpid()
+    log_root = Path(os.environ.get("LOG_ROOT", "logs"))
+    log_root.mkdir(parents=True, exist_ok=True)
+    out = log_root / f"ispring-ui-{args.label}.txt"
+    document: list[str] = []
+
+    for snapshot in range(1, max(1, args.repeat) + 1):
+        if snapshot > 1:
+            countdown(args.every, f"Snapshot {snapshot} of {args.repeat} in:")
+        text, walked = _snapshot(
+            UIAElementInfo, args, own_pid, snapshot, skip_web_views=not args.include_webviews
+        )
+        document.append(text)
+        out.write_text("\n".join(document), encoding="utf-8", errors="replace")
+        print(f"  snapshot {snapshot}: {walked} window(s) walked -> {out}")
+
+    print(f"Wrote {out}")
+    return 0
+
+
+def _snapshot(
+    UIAElementInfo,
+    args,
+    own_pid: int,
+    snapshot: int,
+    skip_web_views: bool,
+) -> tuple[str, int]:
     desktop = UIAElementInfo()  # the desktop root
     try:
         top_level = desktop.children()
     except Exception as exc:  # noqa: BLE001
-        print(f"Could not read the desktop: {exc}", file=sys.stderr)
-        return 1
+        return f"Could not read the desktop: {exc}", 0
 
     inventory: list[str] = []
     walked = 0
@@ -209,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
 
         walked += 1
         lines: list[str] = []
-        _walk(element, 0, args.depth, lines)
+        _walk(element, 0, args.depth, lines, skip_web_views)
         sections.append("=" * 78)
         sections.append(f"window: {title!r}  ({process_name}, pid {pid})")
         sections.append("-" * 78)
@@ -217,8 +289,11 @@ def main(argv: list[str] | None = None) -> int:
         sections.append("")
 
     header = [
-        f"generated_at: {datetime.now(timezone.utc).isoformat()}",
-        f"label: {args.label}   depth: {args.depth}   walked: {walked}",
+        "#" * 78,
+        f"# SNAPSHOT {snapshot}",
+        f"# generated_at: {datetime.now(timezone.utc).isoformat()}",
+        f"# label: {args.label}   depth: {args.depth}   walked: {walked}",
+        "#" * 78,
         "",
         "ALL VISIBLE TOP-LEVEL WINDOWS",
         *inventory,
@@ -231,12 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         header.append("")
 
-    log_root = Path(os.environ.get("LOG_ROOT", "logs"))
-    log_root.mkdir(parents=True, exist_ok=True)
-    out = log_root / f"ispring-ui-{args.label}.txt"
-    out.write_text("\n".join(header + sections), encoding="utf-8", errors="replace")
-    print(f"Wrote {out} ({walked} window(s) walked, {len(inventory)} seen)")
-    return 0
+    return "\n".join(header + sections), walked
 
 
 if __name__ == "__main__":
