@@ -235,7 +235,105 @@ def choose_cloud_destination(dialog, report: Report) -> None:
     )
 
 
-def pick_project(dialog, institution: str, report: Report) -> None:
+def visible_rect(control):
+    """Return the control's rectangle, or None when it has no size.
+
+    Rows scrolled out of the picker still exist in the tree, but with a
+    zero-size rectangle. That is how we tell "off screen" from "missing".
+    """
+    try:
+        rect = control.rectangle()
+    except Exception:  # noqa: BLE001
+        return None
+    if rect.width() <= 0 or rect.height() <= 0:
+        return None
+    return rect
+
+
+def find_named(container, wanted: str, exact: bool = True):
+    """Every element in the picker whose name matches, on screen or not."""
+    target = normalise(wanted).lower()
+    found = []
+    for control in container.descendants():
+        try:
+            name = normalise(control.window_text()).lower()
+        except Exception:  # noqa: BLE001
+            continue
+        if not name:
+            continue
+        if (name == target) if exact else (target in name):
+            found.append(control)
+    return found
+
+
+def scroll_into_view(control, picker, report: Report):
+    """Get a row on screen: ask nicely first, then scroll the list."""
+    rect = visible_rect(control)
+    if rect is not None:
+        return rect
+
+    for attempt in ("iface_scroll_item", "set_focus"):
+        try:
+            if attempt == "iface_scroll_item":
+                control.iface_scroll_item.ScrollIntoView()
+            else:
+                control.set_focus()
+            time.sleep(0.6)
+            rect = visible_rect(control)
+            if rect is not None:
+                report.add("scrolled row into view", f"via {attempt}")
+                return rect
+        except Exception:  # noqa: BLE001
+            continue
+
+    # Last resort: turn the wheel over the list and watch for the row to appear.
+    surface = None
+    for pane in picker.descendants(control_type="Pane"):
+        pane_rect = visible_rect(pane)
+        if pane_rect is not None and pane_rect.height() > 200:
+            surface = pane
+            break
+    if surface is None:
+        surface = picker
+    for turn in range(80):
+        try:
+            surface.wheel_mouse_input(wheel_dist=-3)
+        except Exception as exc:  # noqa: BLE001
+            raise PublishError(f"could not scroll the project list: {exc}") from exc
+        time.sleep(0.25)
+        rect = visible_rect(control)
+        if rect is not None:
+            report.add("scrolled row into view", f"after {turn + 1} wheel turns")
+            return rect
+    raise PublishError("scrolled to the end of the list and the row never appeared")
+
+
+def expand_branch(picker, label: str, report: Report) -> bool:
+    """Open a folder in the tree, e.g. the parent the institutions live under."""
+    for control in find_named(picker, label):
+        rect = visible_rect(control)
+        if rect is None:
+            try:
+                rect = scroll_into_view(control, picker, report)
+            except PublishError:
+                continue
+        try:
+            control.double_click_input()
+            report.add("expanded branch", label)
+            time.sleep(2)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def pick_project(
+    dialog,
+    institution: str,
+    report: Report,
+    parent_folder: str = "",
+    list_only: bool = False,
+) -> None:
     browse = dialog.child_window(auto_id=ID_BROWSE, control_type="Button")
     if not browse.exists():
         raise PublishError("Browse button (7547) not found on the publish dialog")
@@ -248,40 +346,42 @@ def pick_project(dialog, institution: str, report: Report) -> None:
     picker.wait("exists visible", timeout=60)
     report.add("project picker open", PROJECT_DIALOG)
 
-    # The picker is a web page. Report everything reachable so a failure here
-    # tells us what the page actually exposes.
-    edits = picker.descendants(control_type="Edit")
-    report.add("search boxes found", f"{len(edits)}")
-    for edit in edits:
-        report.add("  search box", describe(edit))
-    if not edits:
+    if list_only:
+        names = []
+        for control in picker.descendants():
+            try:
+                name = normalise(control.window_text())
+            except Exception:  # noqa: BLE001
+                continue
+            if name:
+                on_screen = "visible" if visible_rect(control) else "off-screen"
+                names.append(f"    {on_screen:>10}  {name}")
+        report.add("items in the picker", f"{len(names)}")
+        print("\n".join(names[:500]))
+        if len(names) > 500:
+            print(f"    ... and {len(names) - 500} more")
+        return
+
+    matches = find_named(picker, institution)
+    if not matches and parent_folder:
+        report.add("institution not in tree yet", f"opening {parent_folder!r}")
+        expand_branch(picker, parent_folder, report)
+        matches = find_named(picker, institution)
+    if not matches:
+        near = find_named(picker, institution, exact=False)
+        hint = ", ".join(normalise(c.window_text()) for c in near[:5]) or "nothing similar"
         raise PublishError(
-            "no text box inside the project picker — the search field is not "
-            "reachable, so the institution cannot be typed"
+            f"{institution!r} is not in the project tree (closest: {hint}). "
+            "Run again with --list-projects to see the exact names."
         )
 
-    set_text(edits[0], institution, report, "project search")
-    time.sleep(3)
-
-    wanted = normalise(institution).lower()
-    match = None
-    for control in picker.descendants():
-        try:
-            if normalise(control.window_text()).lower() == wanted:
-                match = control
-                break
-        except Exception:  # noqa: BLE001
-            continue
-    if match is None:
-        raise PublishError(
-            f"{institution!r} did not appear in the filtered list — check the "
-            "name matches the project exactly"
-        )
-    report.add("found project row", describe(match))
+    report.add("found project row", describe(matches[0]))
+    rect = scroll_into_view(matches[0], picker, report)
     try:
-        match.click_input()
+        matches[0].click_input()
+        report.add("clicked project row", institution)
     except Exception as exc:  # noqa: BLE001
-        raise PublishError(f"could not click the project row: {exc}") from exc
+        raise PublishError(f"could not click the project row at {rect}: {exc}") from exc
 
     select = picker.child_window(auto_id=ID_OK, control_type="Button")
     if not select.exists():
@@ -360,6 +460,19 @@ def main(argv: list[str] | None = None) -> int:
         default=1800,
         help="Seconds to wait for the publish to finish (default 1800)",
     )
+    parser.add_argument(
+        "--parent-folder",
+        default="PPT Migration",
+        help=(
+            "Folder the institutions sit under, opened first if the name is "
+            "not already in the tree (default: 'PPT Migration')"
+        ),
+    )
+    parser.add_argument(
+        "--list-projects",
+        action="store_true",
+        help="Open the picker, print every name in it, then stop",
+    )
     parser.add_argument("--stop-before-publish", action="store_true")
     parser.add_argument("--inspect", action="store_true", help="Click nothing; only report")
     args = parser.parse_args(argv)
@@ -390,7 +503,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise PublishError("Content name box (7545) not found")
             set_text(field_, args.content_name, report, "content name")
 
-        pick_project(dialog, args.institution, report)
+        pick_project(
+            dialog,
+            args.institution,
+            report,
+            parent_folder=args.parent_folder,
+            list_only=args.list_projects,
+        )
+        if args.list_projects:
+            print("\nLISTED ONLY — nothing was published.")
+            return 0
 
         if args.stop_before_publish:
             print("\nSTOPPED BEFORE PUBLISH — the dialog is set up, nothing was sent.")
