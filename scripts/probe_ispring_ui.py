@@ -4,7 +4,7 @@ The add-in exposes no automation object and no command line, so the publish
 has to be driven through the interface. This dumps what is actually on screen
 so the adapter targets real control names instead of guesses.
 
-Run it twice on the Windows machine, with PowerPoint already open:
+Run it on the Windows machine with PowerPoint already open and in front:
 
     1. Open a deck, click the iSpring Suite 11 ribbon tab, then run:
            python scripts\\probe_ispring_ui.py --label ribbon
@@ -12,20 +12,20 @@ Run it twice on the Windows machine, with PowerPoint already open:
            python scripts\\probe_ispring_ui.py --label publish
 
 Nothing is clicked and nothing is published. Each run writes
-LOG_ROOT/ispring-ui-<label>.txt.
+LOG_ROOT/ispring-ui-<label>.txt, which always begins with a list of every
+visible window it could see.
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import os
 import sys
-from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 
-INTERESTING_PROCESSES = {
+# Windows that are worth walking, by process name.
+TARGET_PROCESSES = {
     "powerpnt.exe",
     "ispringlauncher.exe",
     "ispringsvr.exe",
@@ -35,9 +35,25 @@ INTERESTING_PROCESSES = {
     "infownd.exe",
 }
 
-INTERESTING_TITLE_WORDS = ("ispring", "publish", "powerpoint")
+# Never walk these, even if the title mentions iSpring: they are the terminal
+# this probe is running in, or the editor the path was copied from.
+IGNORED_PROCESSES = {
+    "windowsterminal.exe",
+    "cmd.exe",
+    "conhost.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "code.exe",
+    "explorer.exe",
+    "python.exe",
+    "notepad.exe",
+    "chrome.exe",
+    "msedge.exe",
+}
 
-MAX_CHARS_PER_WINDOW = 400_000
+TITLE_WORDS = ("ispring", "publish", "powerpoint")
+
+MAX_LINES_PER_WINDOW = 4000
 
 
 def _process_name(pid: int) -> str:
@@ -49,44 +65,68 @@ def _process_name(pid: int) -> str:
         return ""
 
 
-def _is_interesting(process_name: str, title: str) -> bool:
-    if process_name.lower() in INTERESTING_PROCESSES:
-        return True
-    lowered = (title or "").lower()
-    return any(word in lowered for word in INTERESTING_TITLE_WORDS)
-
-
-def _dump_window(window, depth: int) -> str:
-    """Capture pywinauto's control identifiers for one top-level window."""
-    buffer = io.StringIO()
+def _text(value) -> str:
     try:
-        with redirect_stdout(buffer):
-            window.print_control_identifiers(depth=depth)
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _describe(element) -> str:
+    name = _text(getattr(element, "name", ""))
+    control_type = _text(getattr(element, "control_type", ""))
+    class_name = _text(getattr(element, "class_name", ""))
+    automation_id = _text(getattr(element, "automation_id", ""))
+    try:
+        rect = _text(element.rectangle)
+    except Exception:  # noqa: BLE001
+        rect = "?"
+    parts = [f"{control_type} {name!r}"]
+    if automation_id:
+        parts.append(f"automation_id={automation_id!r}")
+    if class_name:
+        parts.append(f"class={class_name!r}")
+    parts.append(f"rect={rect}")
+    return "  ".join(parts)
+
+
+def _walk(element, depth: int, max_depth: int, lines: list[str]) -> None:
+    """Depth-first walk of the UIA tree. Version-proof: uses element_info only."""
+    if len(lines) >= MAX_LINES_PER_WINDOW:
+        return
+    lines.append("    " + ("  " * depth) + _describe(element))
+    if depth >= max_depth:
+        return
+    try:
+        children = element.children()
     except Exception as exc:  # noqa: BLE001
-        return f"    <could not read tree: {type(exc).__name__}: {exc}>\n"
-    text = buffer.getvalue()
-    if len(text) > MAX_CHARS_PER_WINDOW:
-        text = text[:MAX_CHARS_PER_WINDOW] + "\n    <truncated>\n"
-    return text
+        lines.append("    " + ("  " * (depth + 1)) + f"<children failed: {exc}>")
+        return
+    for child in children:
+        _walk(child, depth + 1, max_depth, lines)
+        if len(lines) >= MAX_LINES_PER_WINDOW:
+            lines.append("    <truncated: raise --depth carefully or narrow --only>")
+            return
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dump iSpring/PowerPoint UI trees.")
-    parser.add_argument(
-        "--label",
-        default="ui",
-        help="Name for this dump, e.g. ribbon or publish",
-    )
+    parser.add_argument("--label", default="ui", help="Name for this dump")
     parser.add_argument(
         "--depth",
         type=int,
-        default=6,
-        help="How deep to walk each window (default 6; raise if a panel looks empty)",
+        default=8,
+        help="How deep to walk each window (default 8)",
+    )
+    parser.add_argument(
+        "--only",
+        default="",
+        help="Only walk windows whose title contains this text (case-insensitive)",
     )
     parser.add_argument(
         "--all-windows",
         action="store_true",
-        help="Dump every visible top-level window, not just iSpring/PowerPoint ones",
+        help="Walk every visible window, not just PowerPoint and iSpring ones",
     )
     args = parser.parse_args(argv)
 
@@ -95,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        from pywinauto import Desktop  # type: ignore
+        from pywinauto.uia_element_info import UIAElementInfo  # type: ignore
     except ImportError:
         print(
             "pywinauto is missing. Install it with: pip install pywinauto==0.6.8",
@@ -103,52 +143,73 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    desktop = Desktop(backend="uia")
-    sections: list[str] = [
+    own_pid = os.getpid()
+    desktop = UIAElementInfo()  # the desktop root
+    try:
+        top_level = desktop.children()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not read the desktop: {exc}", file=sys.stderr)
+        return 1
+
+    inventory: list[str] = []
+    walked = 0
+    sections: list[str] = []
+
+    for element in top_level:
+        title = _text(getattr(element, "name", ""))
+        try:
+            pid = int(element.process_id)
+        except Exception:  # noqa: BLE001
+            pid = -1
+        process_name = _process_name(pid)
+        inventory.append(f"  {process_name or '?':<24} pid={pid:<8} {title!r}")
+
+        if pid == own_pid:
+            continue
+        lowered_process = process_name.lower()
+        lowered_title = title.lower()
+
+        if args.only:
+            wanted = args.only.lower() in lowered_title
+        elif args.all_windows:
+            wanted = True
+        else:
+            wanted = lowered_process in TARGET_PROCESSES or (
+                lowered_process not in IGNORED_PROCESSES
+                and any(word in lowered_title for word in TITLE_WORDS)
+            )
+        if not wanted:
+            continue
+
+        walked += 1
+        lines: list[str] = []
+        _walk(element, 0, args.depth, lines)
+        sections.append("=" * 78)
+        sections.append(f"window: {title!r}  ({process_name}, pid {pid})")
+        sections.append("-" * 78)
+        sections.extend(lines)
+        sections.append("")
+
+    header = [
         f"generated_at: {datetime.now(timezone.utc).isoformat()}",
-        f"label: {args.label}",
-        f"depth: {args.depth}",
+        f"label: {args.label}   depth: {args.depth}   walked: {walked}",
+        "",
+        "ALL VISIBLE TOP-LEVEL WINDOWS",
+        *inventory,
         "",
     ]
-
-    seen = 0
-    for window in desktop.windows():
-        try:
-            title = window.window_text()
-            pid = window.process_id()
-        except Exception:  # noqa: BLE001
-            continue
-        process_name = _process_name(pid)
-        if not args.all_windows and not _is_interesting(process_name, title):
-            continue
-        seen += 1
-        try:
-            rectangle = window.rectangle()
-            class_name = window.class_name()
-            control_type = window.element_info.control_type
-            visible = window.is_visible()
-        except Exception:  # noqa: BLE001
-            rectangle = class_name = control_type = visible = "?"
-        sections.append("=" * 78)
-        sections.append(f"window: {title!r}")
-        sections.append(f"  process: {process_name} (pid {pid})")
-        sections.append(f"  class_name: {class_name}")
-        sections.append(f"  control_type: {control_type}")
-        sections.append(f"  visible: {visible}  rectangle: {rectangle}")
-        sections.append("-" * 78)
-        sections.append(_dump_window(window, args.depth))
-
-    if seen == 0:
-        sections.append(
-            "No matching window found. Is PowerPoint open and on screen? "
-            "A minimised window is fine, a locked screen is not."
+    if walked == 0:
+        header.append(
+            "Nothing matched. If PowerPoint is open, find it in the list above "
+            "and re-run with --only \"<part of its title>\"."
         )
+        header.append("")
 
     log_root = Path(os.environ.get("LOG_ROOT", "logs"))
     log_root.mkdir(parents=True, exist_ok=True)
     out = log_root / f"ispring-ui-{args.label}.txt"
-    out.write_text("\n".join(sections), encoding="utf-8", errors="replace")
-    print(f"Wrote {out} ({seen} window(s))")
+    out.write_text("\n".join(header + sections), encoding="utf-8", errors="replace")
+    print(f"Wrote {out} ({walked} window(s) walked, {len(inventory)} seen)")
     return 0
 
 
