@@ -223,6 +223,84 @@ def open_row_menu(page, material: str) -> bool:
     return True
 
 
+PUBLIC_TOGGLE_RE = re.compile(r"viewable via link|public|share.*link", re.I)
+NOT_PUBLIC_RE = re.compile(r"not publicly accessible", re.I)
+
+
+def is_on(control) -> bool | None:
+    """Read a switch's state, whichever way the page reports it."""
+    for attribute in ("aria-checked", "aria-pressed", "data-checked"):
+        try:
+            value = control.get_attribute(attribute)
+        except Exception:  # noqa: BLE001
+            continue
+        if value is not None:
+            return value.lower() in ("true", "1", "on", "yes")
+    try:
+        return bool(control.is_checked())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def make_viewable_via_link(page, artifacts) -> bool:
+    """Turn on 'Make viewable via link'.
+
+    Until this is on, the content is private and there is no embed code to
+    read, so this has to happen before looking for the iframe.
+    """
+    already = True
+    for frame in _frames(page):
+        if visible_or_none(frame.get_by_text(NOT_PUBLIC_RE)) is not None:
+            already = False
+            break
+    if already:
+        print("[ok  ] content is already viewable via link")
+        return True
+
+    switch = None
+    for frame in _frames(page):
+        for role in ("switch", "checkbox"):
+            found = visible_or_none(frame.get_by_role(role, name=PUBLIC_TOGGLE_RE))
+            if found is not None:
+                switch = found
+                break
+            found = visible_or_none(frame.get_by_role(role))
+            if found is not None and switch is None:
+                switch = found
+        if switch is not None:
+            break
+
+    if switch is None:
+        # Some builds use a plain clickable label rather than a real switch.
+        if click_by_role(
+            page, PUBLIC_TOGGLE_RE, roles=("button", "link"), what="viewable via link"
+        ):
+            page.wait_for_timeout(2500)
+            return True
+        print("[FAIL] could not find the 'Make viewable via link' toggle")
+        _dump_page(page, artifacts, "04b-no-toggle")
+        return False
+
+    state = is_on(switch)
+    if state:
+        print("[ok  ] link sharing already on")
+        return True
+    try:
+        switch.click()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] could not press the toggle: {exc}")
+        return False
+    page.wait_for_timeout(2500)
+
+    for frame in _frames(page):
+        if visible_or_none(frame.get_by_text(NOT_PUBLIC_RE)) is not None:
+            print("[FAIL] still shows 'not publicly accessible' after the toggle")
+            _dump_page(page, artifacts, "04c-toggle-did-not-take")
+            return False
+    print("[ok  ] turned on 'Make viewable via link'")
+    return True
+
+
 def open_share(page, artifacts) -> bool:
     """Click Share, falling back to the row's right-click menu."""
     if click_by_role(page, SHARE_RE, what="Share"):
@@ -360,6 +438,9 @@ def share_flow(page, context, material: str, institution: str, artifacts) -> str
     page.wait_for_timeout(2000)
     _save_screenshot(page, artifacts, "04-share-dialog")
     _dump_page(page, artifacts, "04-share-dialog")
+
+    make_viewable_via_link(page, artifacts)
+    _save_screenshot(page, artifacts, "04d-after-toggle")
 
     click_by_role(page, EMBED_RE, roles=("tab", "button", "link"), what="Embed")
     page.wait_for_timeout(1500)
