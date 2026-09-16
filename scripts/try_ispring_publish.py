@@ -32,6 +32,7 @@ ID_DESTINATION_HEADER = "7632"
 ID_PROGRESS_STATUS = "141"
 ID_DONE_TEXT = "7807"
 ID_DONE_DETAIL = "7808"
+ID_DONE_MANAGE = "7801"
 
 PUBLISH_DIALOG = "Publish Presentation"
 PROJECT_DIALOG = "Select Project"
@@ -107,6 +108,25 @@ def set_text(control, value: str, report: Report, what: str) -> None:
         raise PublishError(f"could not fill {what}: {exc}") from exc
 
 
+def by_auto_id(container, auto_id: str) -> list:
+    """Find descendants by automation id.
+
+    pywinauto's descendants() does not accept auto_id, so walk and compare.
+    """
+    found = []
+    try:
+        children = container.descendants()
+    except Exception:  # noqa: BLE001
+        return found
+    for control in children:
+        try:
+            if control.element_info.automation_id == auto_id:
+                found.append(control)
+        except Exception:  # noqa: BLE001
+            continue
+    return found
+
+
 def describe(control) -> str:
     try:
         info = control.element_info
@@ -133,6 +153,45 @@ def wait_for(predicate, timeout_s: float, poll_s: float = 1.0):
     if last is not None:
         raise PublishError(f"timed out after {timeout_s}s ({last})")
     raise PublishError(f"timed out after {timeout_s}s")
+
+
+def open_in_powerpoint(pptx: str, report: Report) -> None:
+    """Open the deck through COM so the script can run from a file name alone.
+
+    The file is opened writable and out of Protected View; a deck that stays in
+    Protected View has a dead iSpring ribbon.
+    """
+    import win32com.client  # type: ignore
+    from pathlib import Path
+
+    path = Path(pptx).expanduser().resolve()
+    if not path.is_file():
+        raise PublishError(f"file not found: {path}")
+
+    # Clear the downloaded-from-internet mark, which is what triggers
+    # Protected View.
+    try:
+        import os
+
+        os.remove(f"{path}:Zone.Identifier")
+        report.add("cleared internet mark", path.name)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+    app = win32com.client.Dispatch("PowerPoint.Application")
+    app.Visible = True
+    for presentation in app.Presentations:
+        try:
+            if Path(str(presentation.FullName)).resolve() == path:
+                report.add("deck already open", path.name)
+                return
+        except Exception:  # noqa: BLE001
+            continue
+    app.Presentations.Open(str(path), False, False, True)
+    report.add("opened deck", str(path))
+    time.sleep(3)
 
 
 def find_powerpoint(report: Report):
@@ -400,14 +459,14 @@ def wait_for_completion(window, report: Report, timeout_s: float) -> None:
     """
 
     def done():
-        for control in window.descendants(auto_id=ID_DONE_TEXT):
+        for control in by_auto_id(window, ID_DONE_TEXT):
             text = normalise(control.window_text())
             if text:
                 return control
         return None
 
     def status() -> str:
-        for control in window.descendants(auto_id=ID_PROGRESS_STATUS):
+        for control in by_auto_id(window, ID_PROGRESS_STATUS):
             text = normalise(control.window_text())
             if text:
                 return text
@@ -419,7 +478,7 @@ def wait_for_completion(window, report: Report, timeout_s: float) -> None:
         finished = done()
         if finished is not None:
             report.add("publishing complete", normalise(finished.window_text()))
-            for control in window.descendants(auto_id=ID_DONE_DETAIL):
+            for control in by_auto_id(window, ID_DONE_DETAIL):
                 detail = normalise(control.window_text())
                 if detail:
                     report.add("  detail", detail)
@@ -430,6 +489,51 @@ def wait_for_completion(window, report: Report, timeout_s: float) -> None:
             report.add("progress", current)
         time.sleep(2)
     raise PublishError(f"publish did not finish within {timeout_s}s (last status: {last_status!r})")
+
+
+def read_link_from_browser(window, report: Report, timeout_s: float = 90) -> str:
+    """Click 'Manage Content' and read the URL the browser lands on.
+
+    The finish screen shows no link, so this is the only place a URL appears
+    without a separate trip to the iSpring Cloud site. Best effort: it returns
+    an empty string rather than failing the publish.
+    """
+    from pywinauto import Desktop  # type: ignore
+
+    buttons = by_auto_id(window, ID_DONE_MANAGE)
+    if not buttons:
+        report.add("no Manage Content button", "cannot read a link here", ok=False)
+        return ""
+    before = time.monotonic()
+    try:
+        activate(buttons[0], report, "Manage Content")
+    except PublishError as exc:
+        report.add("could not press Manage Content", str(exc), ok=False)
+        return ""
+
+    deadline = before + timeout_s
+    while time.monotonic() < deadline:
+        for browser in Desktop(backend="uia").windows():
+            try:
+                title = browser.window_text() or ""
+            except Exception:  # noqa: BLE001
+                continue
+            if not any(word in title for word in ("Chrome", "Edge", "Firefox")):
+                continue
+            for name in ("Address and search bar", "Address bar", "Address field"):
+                try:
+                    bar = browser.child_window(title=name, control_type="Edit")
+                    if not bar.exists():
+                        continue
+                    value = normalise(bar.get_value())
+                    if value and "." in value:
+                        report.add("link from browser", value)
+                        return value
+                except Exception:  # noqa: BLE001
+                    continue
+        time.sleep(2)
+    report.add("no link found in the browser", f"waited {timeout_s:.0f}s", ok=False)
+    return ""
 
 
 def close_finished_dialogs(window, report: Report) -> None:
@@ -452,7 +556,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Publish the open presentation to iSpring Cloud."
     )
+    parser.add_argument("--pptx", default="", help="Deck to open first (optional)")
     parser.add_argument("--institution", required=True, help="Project name in iSpring Cloud")
+    parser.add_argument(
+        "--get-link",
+        action="store_true",
+        help="After publishing, press Manage Content and read the browser's URL",
+    )
     parser.add_argument("--content-name", default="", help="Content name to set")
     parser.add_argument(
         "--timeout",
@@ -487,7 +597,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = Report()
+    link = ""
     try:
+        if args.pptx:
+            open_in_powerpoint(args.pptx, report)
         _app, window = find_powerpoint(report)
         dismiss_nuisance_dialogs(window, report)
         dialog = open_publish_dialog(window, report, args.inspect)
@@ -525,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
         activate(publish, report, "Publish")
         wait_for_completion(window, report, args.timeout)
         report.add("elapsed", f"{time.monotonic() - started:.0f}s")
+        if args.get_link:
+            link = read_link_from_browser(window, report)
         close_finished_dialogs(window, report)
     except PublishError as exc:
         print(f"\nPUBLISH FAILED: {exc}", file=sys.stderr)
@@ -534,6 +649,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print("\nPUBLISH OK")
+    if link:
+        print(f"link={link}")
+    elif args.get_link:
+        print("link= (not found — see the FAIL lines above)")
     return 0
 
 
