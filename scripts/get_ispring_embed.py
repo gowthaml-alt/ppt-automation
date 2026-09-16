@@ -51,6 +51,56 @@ SHARE_RE = re.compile(r"^\s*share\b", re.I)
 EMBED_RE = re.compile(r"embed", re.I)
 
 
+POPUP_SELECTORS = (
+    '[data-at*="uikit-layer-popup"]',
+    '[role="dialog"]',
+    '[class*="uikit-layer"]',
+    '[class*="popup"]',
+    '[class*="modal"]',
+)
+
+
+def popup_root(page):
+    """The Share popup itself.
+
+    Everything in the dialog must be looked for inside this element. Searching
+    the whole page finds matching text in the library list behind the popup,
+    and the clicks then land on that list instead of the dialog.
+    """
+    for frame in _frames(page):
+        for selector in POPUP_SELECTORS:
+            try:
+                locator = frame.locator(selector)
+                count = locator.count()
+            except Exception:  # noqa: BLE001
+                continue
+            for index in range(min(count, 5)):
+                item = locator.nth(index)
+                try:
+                    if item.is_visible():
+                        return item
+                except Exception:  # noqa: BLE001
+                    continue
+    return None
+
+
+def scope(page):
+    """The popup when one is open, otherwise the whole page."""
+    root = popup_root(page)
+    return root if root is not None else page
+
+
+def describe_popup(page, limit: int = 6000) -> str:
+    """The popup's markup, for when a control cannot be reached."""
+    root = popup_root(page)
+    if root is None:
+        return "<no popup element found>"
+    try:
+        return root.evaluate("el => el.outerHTML")[:limit]
+    except Exception as exc:  # noqa: BLE001
+        return f"<could not read popup html: {exc}>"
+
+
 def safe_click(locator, what: str = "") -> bool:
     """Click something the page has covered with a styled overlay.
 
@@ -270,10 +320,7 @@ def is_on(control) -> bool | None:
 
 def is_public(page) -> bool:
     """True only when the dialog no longer says the content is private."""
-    for frame in _frames(page):
-        if visible_or_none(frame.get_by_text(NOT_PUBLIC_RE)) is not None:
-            return False
-    return True
+    return visible_or_none(scope(page).get_by_text(NOT_PUBLIC_RE)) is None
 
 
 def ancestors(locator, levels: int = 4):
@@ -294,23 +341,28 @@ def ancestors(locator, levels: int = 4):
 
 
 def toggle_candidates(page):
-    """Controls that might be the 'Make viewable via link' switch."""
+    """Controls in the popup that might be the 'Make viewable via link' switch.
+
+    Only the first switch in the popup is wanted: the second one is 'Restrict
+    with password', which must not be touched.
+    """
+    root = scope(page)
     found = []
-    for frame in _frames(page):
-        for getter in (
-            lambda: frame.get_by_role("switch", name=PUBLIC_TOGGLE_RE),
-            lambda: frame.get_by_role("checkbox", name=PUBLIC_TOGGLE_RE),
-            lambda: frame.get_by_role("switch"),
-            lambda: frame.get_by_role("checkbox"),
-            lambda: frame.locator("input[type=checkbox]"),
-        ):
-            try:
-                locator = getter()
-                count = locator.count()
-            except Exception:  # noqa: BLE001
-                continue
-            for index in range(min(count, 6)):
-                found.append(locator.nth(index))
+    for getter in (
+        lambda: root.get_by_role("switch", name=PUBLIC_TOGGLE_RE),
+        lambda: root.get_by_role("checkbox", name=PUBLIC_TOGGLE_RE),
+        lambda: root.get_by_role("switch"),
+        lambda: root.get_by_role("checkbox"),
+        lambda: root.locator("input[type=checkbox]"),
+    ):
+        try:
+            locator = getter()
+            count = locator.count()
+        except Exception:  # noqa: BLE001
+            continue
+        if count:
+            # First one only: the password switch sits lower in the dialog.
+            found.append(locator.first)
     return found
 
 
@@ -344,43 +396,39 @@ def js_click(locator, what: str) -> bool:
 def click_switch_beside_off(page) -> bool:
     """Click the visible switch, found by the word 'Off' printed next to it.
 
-    The switch itself has no name or role we can match, but the state label
-    beside it does, and the switch sits just to its right on the same line.
+    Scoped to the popup: the library behind it also has rows with matching
+    text, and clicking those does nothing useful.
     """
-    label_box = None
-    for frame in _frames(page):
-        label = visible_or_none(frame.get_by_text(PUBLIC_TOGGLE_RE))
-        if label is None:
-            continue
-        try:
-            label_box = label.bounding_box()
-        except Exception:  # noqa: BLE001
-            label_box = None
-        if label_box:
-            break
+    root = scope(page)
+    label = visible_or_none(root.get_by_text(PUBLIC_TOGGLE_RE))
+    if label is None:
+        return False
+    try:
+        label_box = label.bounding_box()
+    except Exception:  # noqa: BLE001
+        return False
     if not label_box:
         return False
     row_middle = label_box["y"] + label_box["height"] / 2
 
     best = None
-    for frame in _frames(page):
-        locator = frame.get_by_text(re.compile(r"^\s*off\s*$", re.I))
+    locator = root.get_by_text(re.compile(r"^\s*off\s*$", re.I))
+    try:
+        count = locator.count()
+    except Exception:  # noqa: BLE001
+        count = 0
+    for index in range(min(count, 6)):
+        item = locator.nth(index)
         try:
-            count = locator.count()
+            if not item.is_visible():
+                continue
+            box = item.bounding_box() or {}
         except Exception:  # noqa: BLE001
             continue
-        for index in range(min(count, 6)):
-            item = locator.nth(index)
-            try:
-                if not item.is_visible():
-                    continue
-                box = item.bounding_box() or {}
-            except Exception:  # noqa: BLE001
-                continue
-            middle = box.get("y", 0) + box.get("height", 0) / 2
-            gap = abs(middle - row_middle)
-            if gap < 40 and (best is None or gap < best[0]):
-                best = (gap, box)
+        middle = box.get("y", 0) + box.get("height", 0) / 2
+        gap = abs(middle - row_middle)
+        if gap < 40 and (best is None or gap < best[0]):
+            best = (gap, box)
     if best is None:
         return False
 
@@ -453,6 +501,9 @@ def make_viewable_via_link(page, artifacts) -> bool:
 
     _dump_page(page, artifacts, "04c-toggle-stuck-off")
     _save_screenshot(page, artifacts, "04c-toggle-stuck-off")
+    print("---- share popup markup ----")
+    print(describe_popup(page))
+    print("---- end popup markup ----")
     return False
 
 
@@ -471,6 +522,20 @@ def read_embed_code(page) -> str:
     Looks in form fields first, then anywhere on the page, so it does not
     depend on which element iSpring puts the code in.
     """
+    root = scope(page)
+    for selector in ("textarea", "input[type=text]", "input:not([type])"):
+        try:
+            locator = root.locator(selector)
+            count = locator.count()
+        except Exception:  # noqa: BLE001
+            count = 0
+        for index in range(min(count, 12)):
+            try:
+                value = locator.nth(index).input_value(timeout=2000)
+            except Exception:  # noqa: BLE001
+                continue
+            if value and "<iframe" in value.lower():
+                return value.strip()
     for frame in _frames(page):
         for selector in ("textarea", "input[type=text]", "input:not([type])"):
             try:
