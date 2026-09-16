@@ -51,6 +51,31 @@ SHARE_RE = re.compile(r"^\s*share\b", re.I)
 EMBED_RE = re.compile(r"embed", re.I)
 
 
+def safe_click(locator, what: str = "") -> bool:
+    """Click something the page has covered with a styled overlay.
+
+    iSpring's controls are real inputs hidden under decorative divs, so the
+    normal click is refused ("subtree intercepts pointer events"). Force skips
+    that check; dispatching the event needs no coordinates at all.
+    """
+    attempts = (
+        ("normal", lambda: locator.click(timeout=4000)),
+        ("force", lambda: locator.click(force=True, timeout=4000)),
+        ("dispatch", lambda: locator.dispatch_event("click")),
+        ("check", lambda: locator.check(force=True, timeout=4000)),
+    )
+    for name, action in attempts:
+        try:
+            action()
+            if name != "normal":
+                print(f"[ok  ] clicked {what or 'control'} ({name})")
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    print(f"[FAIL] could not click {what or 'control'} by any method")
+    return False
+
+
 def visible_or_none(locator):
     try:
         count = locator.count()
@@ -71,16 +96,14 @@ def click_by_role(page, pattern, roles=("button", "menuitem", "link", "tab"), wh
         for role in roles:
             found = visible_or_none(frame.get_by_role(role, name=pattern))
             if found is not None:
-                found.click()
-                print(f"[ok  ] clicked {what or pattern.pattern} ({role})")
-                return True
+                if safe_click(found, f"{what or pattern.pattern} ({role})"):
+                    return True
     found = None
     for frame in _frames(page):
         found = visible_or_none(frame.get_by_text(pattern))
         if found is not None:
-            found.click()
-            print(f"[ok  ] clicked {what or pattern.pattern} (text)")
-            return True
+            if safe_click(found, f"{what or pattern.pattern} (text)"):
+                return True
     return False
 
 
@@ -126,14 +149,16 @@ def enter_folder(page, folder: str) -> bool:
     row = scroll_hunt(page, folder)
     if row is None:
         return False
-    for action in ("dblclick", "click"):
-        try:
-            getattr(row, action)()
-            page.wait_for_timeout(2500)
-            print(f"[ok  ] opened folder {folder!r} ({action})")
-            return True
-        except Exception:  # noqa: BLE001
-            continue
+    try:
+        row.dblclick(timeout=4000)
+        page.wait_for_timeout(2500)
+        print(f"[ok  ] opened folder {folder!r} (dblclick)")
+        return True
+    except Exception:  # noqa: BLE001
+        pass
+    if safe_click(row, f"folder {folder!r}"):
+        page.wait_for_timeout(2500)
+        return True
     return False
 
 
@@ -216,7 +241,8 @@ def open_row_menu(page, material: str) -> bool:
 
     # Right-most button on the row is the three-dot menu.
     candidates.sort(key=lambda pair: pair[0])
-    candidates[-1][1].click()
+    if not safe_click(candidates[-1][1], "three-dot menu"):
+        return False
     page.wait_for_timeout(1200)
     items = menu_items(page)
     print(f"[ok  ] opened the row menu; items: {items}")
@@ -285,10 +311,7 @@ def make_viewable_via_link(page, artifacts) -> bool:
     if state:
         print("[ok  ] link sharing already on")
         return True
-    try:
-        switch.click()
-    except Exception as exc:  # noqa: BLE001
-        print(f"[FAIL] could not press the toggle: {exc}")
+    if not safe_click(switch, "'Make viewable via link' toggle"):
         return False
     page.wait_for_timeout(2500)
 
@@ -440,9 +463,18 @@ def share_flow(page, context, material: str, institution: str, artifacts) -> str
     _dump_page(page, artifacts, "04-share-dialog")
 
     make_viewable_via_link(page, artifacts)
+    page.wait_for_timeout(2000)
     _save_screenshot(page, artifacts, "04d-after-toggle")
+    _dump_page(page, artifacts, "04d-after-toggle")
 
-    click_by_role(page, EMBED_RE, roles=("tab", "button", "link"), what="Embed")
+    # Once sharing is on, the embed code is often already on the dialog, so
+    # read before clicking anything — one less thing to go wrong.
+    embed = read_embed_code(page)
+    if embed:
+        print("[ok  ] embed code was already on the dialog")
+        return embed
+
+    click_by_role(page, EMBED_RE, roles=("tab", "button", "link"), what="Embed code")
     page.wait_for_timeout(1500)
     _save_screenshot(page, artifacts, "05-embed")
     _dump_page(page, artifacts, "05-embed")
