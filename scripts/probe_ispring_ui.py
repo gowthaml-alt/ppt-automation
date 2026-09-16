@@ -128,6 +128,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Walk every visible window, not just PowerPoint and iSpring ones",
     )
+    parser.add_argument(
+        "--wait",
+        type=int,
+        default=0,
+        help=(
+            "Seconds to wait before reading the screen. Use this to start the "
+            "probe, then switch to PowerPoint and open the window you want dumped."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if sys.platform != "win32":
@@ -142,6 +151,18 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.wait > 0:
+        import time
+
+        print(
+            f"Waiting {args.wait}s. Switch to PowerPoint now and open the window "
+            "you want dumped."
+        )
+        for remaining in range(args.wait, 0, -1):
+            print(f"  {remaining:>3}s ", end="\r", flush=True)
+            time.sleep(1)
+        print("Reading the screen now.      ")
 
     own_pid = os.getpid()
     desktop = UIAElementInfo()  # the desktop root
@@ -168,6 +189,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         lowered_process = process_name.lower()
         lowered_title = title.lower()
+
+        if lowered_process in IGNORED_PROCESSES and not args.all_windows:
+            # The terminal this probe runs in has the search word in its own
+            # title, so it must never match.
+            continue
 
         if args.only:
             wanted = args.only.lower() in lowered_title
