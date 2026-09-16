@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import stat
 import subprocess
 import sys
 import threading
@@ -63,6 +61,17 @@ class PowerPointService:
         self._presentation = None
         self._terminate_processes = terminate_processes or terminate_powerpoint_processes
         self._open_cleanup_done = False
+        self._current_pptx: Path | None = None
+
+    @property
+    def current_pptx(self) -> Path | None:
+        """The file the open presentation lives in.
+
+        A repaired presentation has to be saved under a new name, so this is
+        not always the path handed to :meth:`open`. Callers that hand the file
+        to another tool must use this instead of the path they passed in.
+        """
+        return self._current_pptx
 
     def is_available(self) -> tuple[bool, str]:
         if sys.platform != "win32":
@@ -106,6 +115,7 @@ class PowerPointService:
             else float(timeout_s)
         )
         self._open_cleanup_done = False
+        self._current_pptx = None
         repair_attempted = False
         timed_out = threading.Event()
         done = threading.Event()
@@ -164,6 +174,7 @@ class PowerPointService:
                     user_message=USER_OPEN_TIMEOUT,
                 )
             self._reject_protected_view()
+            self._current_pptx = resolved
             saved = self._save_repaired_if_needed(resolved)
             if timed_out.is_set():
                 raise PowerPointAutomationError(
@@ -220,6 +231,7 @@ class PowerPointService:
 
     def quit(self) -> None:
         self.close()
+        self._current_pptx = None
         app = self._app
         self._app = None
         if app is None:
@@ -227,7 +239,18 @@ class PowerPointService:
         try:
             app.Quit()
         except Exception:
-            logger.warning("PowerPoint Quit failed", exc_info=True)
+            # PowerPoint sometimes exits on its own once its last presentation
+            # closes, which turns Quit into a dead RPC. Make sure no orphan
+            # POWERPNT.EXE is left behind to poison the next job.
+            logger.warning(
+                "PowerPoint Quit failed; terminating the process",
+                extra={"stage": "powerpoint_close"},
+                exc_info=True,
+            )
+            try:
+                self._terminate_processes()
+            except Exception:
+                logger.warning("PowerPoint terminate after Quit failed", exc_info=True)
 
     def _reject_protected_view(self) -> None:
         windows = getattr(self._app, "ProtectedViewWindows", None)
@@ -279,13 +302,15 @@ class PowerPointService:
         return self._save_under_new_name(dest)
 
     def _save_under_new_name(self, dest: Path) -> bool:
-        """Write the repair to a sibling file, then swap it onto ``dest``.
+        """Save the repair beside ``dest`` and keep working from there.
 
         PowerPoint refuses ``SaveAs`` back onto the path a repaired
         presentation was opened from ("must be saved with a different name"),
-        so the repair is saved beside it, the presentation is closed to release
-        both files, the sibling replaces the working copy, and the now-clean
-        file is reopened without repair.
+        so the repair goes to a sibling file and the presentation stays open on
+        it. Swapping the file back onto ``dest`` would mean closing the
+        presentation first, and closing the last open presentation can make
+        PowerPoint exit underneath us, so the new path is reported through
+        :attr:`current_pptx` instead.
         """
         presentation = self._presentation
         if presentation is None:
@@ -310,35 +335,10 @@ class PowerPointService:
                 f"SaveAs after repair failed: {exc}",
                 user_message=USER_SAVE_FAILED,
             ) from exc
-
-        self.close()
-
-        try:
-            _clear_read_only(dest)
-            os.replace(repaired, dest)
-        except OSError as exc:
-            raise PowerPointAutomationError(
-                f"could not swap repaired copy onto the working file: {exc}",
-                user_message=USER_SAVE_FAILED,
-            ) from exc
-
-        open2007 = self._open2007_callable()
-        if open2007 is None:
-            raise PowerPointAutomationError(
-                "Presentations.Open2007 is not available for reopen",
-                user_message=USER_SAVE_FAILED,
-            )
-        try:
-            self._presentation = open2007(str(dest), False, False, True, False)
-        except Exception as exc:
-            raise PowerPointAutomationError(
-                f"reopening the repaired presentation failed: {exc}",
-                user_message=USER_SAVE_FAILED,
-            ) from exc
-        self._reject_protected_view()
+        self._current_pptx = repaired
         logger.info(
-            "repaired presentation saved and reopened",
-            extra={"stage": "powerpoint_open"},
+            "repaired presentation saved under a new name",
+            extra={"stage": "powerpoint_open", "working_pptx": repaired.name},
         )
         return True
 
@@ -363,6 +363,13 @@ class PowerPointService:
 class NoOpPowerPointService:
     """Used off Windows and in unit tests. Does not launch PowerPoint."""
 
+    def __init__(self) -> None:
+        self._current_pptx: Path | None = None
+
+    @property
+    def current_pptx(self) -> Path | None:
+        return self._current_pptx
+
     def is_available(self) -> tuple[bool, str]:
         return True, "noop"
 
@@ -370,12 +377,14 @@ class NoOpPowerPointService:
         return None
 
     def open(self, path: Path, timeout_s: float | None = None) -> None:
+        self._current_pptx = Path(path)
         return None
 
     def close(self) -> None:
         return None
 
     def quit(self) -> None:
+        self._current_pptx = None
         return None
 
 
@@ -394,17 +403,6 @@ def _is_read_only(presentation) -> bool:
         return bool(presentation.ReadOnly)
     except Exception:
         return False
-
-
-def _clear_read_only(path: Path) -> None:
-    try:
-        path.chmod(path.stat().st_mode | stat.S_IWRITE | stat.S_IWUSR)
-    except OSError:
-        logger.warning(
-            "could not clear read-only flag before swapping repaired copy",
-            extra={"stage": "powerpoint_open"},
-            exc_info=True,
-        )
 
 
 def _is_readonly_save_error(exc: BaseException) -> bool:

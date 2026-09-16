@@ -56,7 +56,18 @@ def test_success_sends_completed_callback_and_cleans_up(tmp_path):
     assert deps["powerpoint"].quit_calls >= 1
     assert "working" in deps["powerpoint"].opened[0]
     assert deps["powerpoint"].last_timeout_s == 120
+    assert deps["publisher"].published == deps["powerpoint"].opened
     assert not (tmp_path / "jobs" / "101").exists()
+
+
+def test_publish_uses_the_file_powerpoint_actually_has_open(tmp_path):
+    powerpoint = FakePowerPoint(repaired_name="source.repaired.pptx")
+    pipeline, deps = _pipeline(tmp_path, powerpoint=powerpoint)
+    pipeline.process(make_job())
+    assert deps["backend"].results[0]["status"] == "completed"
+    assert deps["publisher"].published == [
+        str(Path(powerpoint.opened[0]).with_name("source.repaired.pptx"))
+    ]
 
 
 def test_pipeline_opens_and_publishes_working_copy_without_changing_original(tmp_path):

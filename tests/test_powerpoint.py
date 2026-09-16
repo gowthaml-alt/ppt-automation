@@ -208,13 +208,14 @@ def test_repairable_file_is_saved_to_working_copy_only(tmp_path, caplog):
     assert records[-1].open_result == "success"
 
 
-def test_readonly_repair_is_saved_under_a_new_name_then_swapped(tmp_path, caplog):
+def test_readonly_repair_is_saved_under_a_new_name(tmp_path, caplog):
     caplog.set_level(logging.INFO)
     original = tmp_path / "input" / "source.pptx"
     original.parent.mkdir(parents=True)
     original.write_bytes(minimal_pptx_bytes())
     working = _working_pptx(tmp_path)
     original_bytes = original.read_bytes()
+    working_bytes = working.read_bytes()
     presentation = FakePresentation(
         working,
         saved=False,
@@ -225,16 +226,19 @@ def test_readonly_repair_is_saved_under_a_new_name_then_swapped(tmp_path, caplog
     )
     presentations = FakePresentations(presentation)
     killed: list[int] = []
-    _service(tmp_path, FakeApp(presentations), killed).open(working)
+    service = _service(tmp_path, FakeApp(presentations), killed)
+    service.open(working)
     repaired = working.resolve().with_name("source.repaired.pptx")
     assert presentation.save_calls == 1
     assert presentation.save_as_calls == [(str(repaired), 24)]
-    assert presentation.closed == 1
-    assert not repaired.exists()
-    assert working.read_bytes() == b"repaired-working-copy"
+    assert repaired.read_bytes() == b"repaired-working-copy"
+    # The presentation stays open on the repaired file: closing the last one
+    # can make PowerPoint exit underneath us.
+    assert presentation.closed == 0
+    assert len(presentations.calls) == 1
+    assert service.current_pptx == repaired
+    assert working.read_bytes() == working_bytes
     assert original.read_bytes() == original_bytes
-    assert [call["OpenAndRepair"] for call in presentations.calls] == [True, False]
-    assert presentations.calls[-1]["FileName"] == str(working.resolve())
     assert killed == []
     records = [r for r in caplog.records if getattr(r, "open_result", None)]
     assert records[-1].saved is True
@@ -245,12 +249,36 @@ def test_read_only_presentation_skips_save_and_goes_straight_to_save_as(tmp_path
     working = _working_pptx(tmp_path)
     presentation = FakePresentation(working, saved=False, read_only=True)
     presentations = FakePresentations(presentation)
-    _service(tmp_path, FakeApp(presentations)).open(working)
+    service = _service(tmp_path, FakeApp(presentations))
+    service.open(working)
     repaired = working.resolve().with_name("source.repaired.pptx")
     assert presentation.save_calls == 0
     assert presentation.save_as_calls == [(str(repaired), 24)]
-    assert working.read_bytes() == b"repaired-working-copy"
-    assert not repaired.exists()
+    assert service.current_pptx == repaired
+
+
+def test_current_pptx_is_the_opened_path_when_no_repair_is_needed(tmp_path):
+    working = _working_pptx(tmp_path)
+    service = _service(tmp_path, FakeApp(FakePresentations(FakePresentation(working))))
+    service.open(working)
+    assert service.current_pptx == working.resolve()
+    service.quit()
+    assert service.current_pptx is None
+
+
+def test_quit_failure_terminates_powerpoint(tmp_path):
+    working = _working_pptx(tmp_path)
+    app = FakeApp(FakePresentations(FakePresentation(working)))
+
+    def _boom() -> None:
+        raise RuntimeError("The remote procedure call failed.")
+
+    app.Quit = _boom
+    killed: list[int] = []
+    service = _service(tmp_path, app, killed)
+    service.open(working)
+    service.quit()
+    assert killed == [1]
 
 
 def test_save_as_failure_after_readonly_save_terminates_powerpoint(tmp_path, caplog):

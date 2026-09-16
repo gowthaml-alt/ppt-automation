@@ -36,6 +36,9 @@ class PowerPointLike(Protocol):
     def close(self) -> None: ...
     def quit(self) -> None: ...
 
+    @property
+    def current_pptx(self) -> Path | None: ...
+
 
 class PublisherLike(Protocol):
     def publish(self, pptx, output_dir, timeout_s: int): ...
@@ -105,6 +108,9 @@ class Pipeline:
                 working,
                 timeout_s=self._settings.powerpoint_open_timeout_seconds,
             )
+            # A repaired file is saved under a new name, so publish whatever
+            # PowerPoint actually has open, not the path we handed it.
+            working = getattr(self._powerpoint, "current_pptx", None) or working
             set_stage("ispring_publish")
             self._publisher.publish(
                 working,
