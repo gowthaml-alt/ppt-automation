@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -10,6 +11,13 @@ from utils.logging_config import scrub_url
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 OOXML_MAGIC = b"PK\x03\x04"
+REQUIRED_PPTX_PARTS = ("[Content_Types].xml", "ppt/presentation.xml")
+ENCRYPTED_PPTX_NAMES = frozenset({"EncryptionInfo", "EncryptedPackage"})
+
+USER_NOT_POWERPOINT = "The downloaded file is not a valid PowerPoint file."
+USER_INVALID_PACKAGE = "The PowerPoint file is not a valid package."
+USER_MISSING_PARTS = "The PowerPoint file is missing required package parts."
+USER_PASSWORD_PROTECTED = "The PowerPoint file is password-protected."
 
 
 def validate_download_url(url: str, allowed_hosts: list[str]) -> str:
@@ -59,5 +67,36 @@ def assert_looks_like_pptx(path: Path) -> None:
         raise DownloadError(
             f"downloaded file is not a valid PowerPoint package "
             f"(header {header!r}, expected {OOXML_MAGIC!r})",
-            user_message="The downloaded file is not a valid PowerPoint file.",
+            user_message=USER_NOT_POWERPOINT,
+        )
+
+
+def assert_valid_pptx_package(path: Path) -> None:
+    """Raise unless ``path`` is a readable PPTX with required OPC parts."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = {name.replace("\\", "/") for name in archive.namelist()}
+    except zipfile.BadZipFile as exc:
+        raise DownloadError(
+            f"downloaded file is not a valid PowerPoint package: {path.name}",
+            user_message=USER_INVALID_PACKAGE,
+        ) from exc
+    except OSError as exc:
+        raise DownloadError(
+            f"could not read downloaded file {path.name}: {exc}",
+            user_message=USER_INVALID_PACKAGE,
+        ) from exc
+
+    basenames = {name.rsplit("/", 1)[-1] for name in names}
+    if ENCRYPTED_PPTX_NAMES & basenames:
+        raise DownloadError(
+            f"downloaded file is password-protected: {path.name}",
+            user_message=USER_PASSWORD_PROTECTED,
+        )
+
+    missing = [part for part in REQUIRED_PPTX_PARTS if part not in names]
+    if missing:
+        raise DownloadError(
+            f"downloaded file is missing package parts {missing}: {path.name}",
+            user_message=USER_MISSING_PARTS,
         )

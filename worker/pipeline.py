@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
 from api_client.jobs import Job, UploadResult, record_orphaned_output
 from config.settings import Settings
 from downloader.pptx import download_pptx
+from powerpoint.service import USER_DAMAGED
 from storage.backend import output_prefix
 from utils.cleanup import CleanupService
-from utils.exceptions import CallbackError, LowDiskSpaceError, PptAutomationError
+from utils.exceptions import (
+    CallbackError,
+    LowDiskSpaceError,
+    PowerPointAutomationError,
+    PptAutomationError,
+)
 from utils.logging_config import bind_job_context, clear_job_context, set_stage
 from utils.paths import JobPaths, build_job_paths, create_job_dirs, free_disk_gb
 from validator.html5 import validate_ispring_output
@@ -21,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 class PowerPointLike(Protocol):
     def start(self) -> None: ...
-    def open(self, path) -> None: ...
+    def open(self, path, timeout_s: float | None = None) -> None: ...
     def close(self) -> None: ...
     def quit(self) -> None: ...
 
@@ -88,11 +96,15 @@ class Pipeline:
             set_stage("download")
             self._downloader(job.ppt_file_url, paths, self._settings)
             set_stage("powerpoint_open")
+            working = self._copy_working_pptx(paths)
             self._powerpoint.start()
-            self._powerpoint.open(paths.source_pptx)
+            self._powerpoint.open(
+                working,
+                timeout_s=self._settings.powerpoint_open_timeout_seconds,
+            )
             set_stage("ispring_publish")
             self._publisher.publish(
-                paths.source_pptx,
+                working,
                 paths.output_dir,
                 self._settings.ispring_publish_timeout_seconds,
             )
@@ -146,6 +158,16 @@ class Pipeline:
                 user_message="There is not enough disk space to process this job.",
             )
         create_job_dirs(paths)
+
+    def _copy_working_pptx(self, paths: JobPaths) -> Path:
+        try:
+            shutil.copy2(paths.source_pptx, paths.working_pptx)
+        except OSError as exc:
+            raise PowerPointAutomationError(
+                f"could not create working copy: {exc}",
+                user_message=USER_DAMAGED,
+            ) from exc
+        return paths.working_pptx
 
     def _safe_close_powerpoint(self) -> None:
         try:

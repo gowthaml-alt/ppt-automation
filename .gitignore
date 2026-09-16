@@ -10,6 +10,7 @@ temp/*
 !temp/.gitkeep
 logs/*
 !logs/.gitkeep
+test-artifacts/
 *.pptx
 *.part
 .DS_Store

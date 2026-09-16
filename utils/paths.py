@@ -27,6 +27,10 @@ class JobPaths:
     def partial_pptx(self) -> Path:
         return self.input_dir / (SOURCE_FILENAME + PARTIAL_SUFFIX)
 
+    @property
+    def working_pptx(self) -> Path:
+        return self.working_dir / SOURCE_FILENAME
+
 
 def build_job_paths(temp_root: str | Path, queue_id: int) -> JobPaths:
     """Build the directory layout for a job.

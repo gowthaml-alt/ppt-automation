@@ -54,7 +54,52 @@ def test_success_sends_completed_callback_and_cleans_up(tmp_path):
     assert deps["backend"].results[0]["iframe_url"].endswith("/ppt/5001/index.html")
     assert deps["browser"].checked
     assert deps["powerpoint"].quit_calls >= 1
+    assert "working" in deps["powerpoint"].opened[0]
+    assert deps["powerpoint"].last_timeout_s == 120
     assert not (tmp_path / "jobs" / "101").exists()
+
+
+def test_pipeline_opens_and_publishes_working_copy_without_changing_original(tmp_path):
+    from tests.pptx_bytes import minimal_pptx_bytes
+    from utils.paths import build_job_paths, create_job_dirs
+
+    original_bytes = minimal_pptx_bytes()
+
+    def downloader(url, paths, settings, **kwargs):
+        create_job_dirs(paths)
+        paths.source_pptx.write_bytes(original_bytes)
+        return paths.source_pptx
+
+    class RecordingPowerPoint:
+        def __init__(self) -> None:
+            self.opened: list[str] = []
+            self.quit_calls = 0
+            self.source_after_open = b""
+
+        def start(self) -> None:
+            return None
+
+        def open(self, path, timeout_s=None) -> None:
+            path = Path(path)
+            source = path.parent.parent / "input" / "source.pptx"
+            self.opened.append(str(path))
+            path.write_bytes(b"repaired-on-working-copy")
+            self.source_after_open = source.read_bytes()
+
+        def close(self) -> None:
+            return None
+
+        def quit(self) -> None:
+            self.quit_calls += 1
+
+    powerpoint = RecordingPowerPoint()
+    pipeline, deps = _pipeline(tmp_path, powerpoint=powerpoint, downloader=downloader)
+    pipeline.process(make_job())
+    paths = build_job_paths(tmp_path / "jobs", 101)
+    assert powerpoint.opened == [str(paths.working_pptx)]
+    assert powerpoint.source_after_open == original_bytes
+    assert deps["publisher"].published == [str(paths.working_pptx)]
+    assert deps["powerpoint"].quit_calls >= 1 or powerpoint.quit_calls >= 1
 
 
 def test_publish_failure_sends_failed_callback(tmp_path):

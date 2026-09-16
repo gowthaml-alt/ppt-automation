@@ -14,6 +14,7 @@ def test_build_job_paths_uses_the_queue_id_only(tmp_path):
     assert paths.root == tmp_path / "101"
     assert paths.source_pptx == paths.input_dir / "source.pptx"
     assert paths.partial_pptx == paths.input_dir / "source.pptx.part"
+    assert paths.working_pptx == paths.working_dir / "source.pptx"
 
 
 def test_build_job_paths_rejects_a_non_integer(tmp_path):

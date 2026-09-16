@@ -12,7 +12,11 @@ from utils.exceptions import DownloadError
 from utils.http import create_sync_client
 from utils.logging_config import scrub_url
 from utils.paths import JobPaths
-from utils.validators import assert_looks_like_pptx, validate_download_url
+from utils.validators import (
+    assert_looks_like_pptx,
+    assert_valid_pptx_package,
+    validate_download_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,7 @@ def download_pptx(
     try:
         _stream_to_partial(client, url, partial, settings.max_ppt_size_bytes)
         assert_looks_like_pptx(partial)
+        assert_valid_pptx_package(partial)
         partial.replace(dest)
     except DownloadError:
         _remove_if_exists(partial)

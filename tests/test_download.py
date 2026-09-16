@@ -5,10 +5,16 @@ import pytest
 
 from config.settings import Settings
 from downloader.pptx import download_pptx
+from tests.pptx_bytes import (
+    encrypted_pptx_bytes,
+    invalid_zip_with_magic_bytes,
+    minimal_pptx_bytes,
+    zip_missing_presentation_bytes,
+)
 from utils.exceptions import DownloadError
 from utils.paths import build_job_paths, create_job_dirs
 
-PPTX = b"PK\x03\x04" + b"payload-bytes"
+PPTX = minimal_pptx_bytes()
 
 
 def _settings(tmp_path: Path, **overrides) -> Settings:
@@ -71,10 +77,60 @@ def test_html_error_page_fails_magic_bytes(tmp_path):
         return httpx.Response(200, content=b"<html>not a pptx</html>")
 
     paths = _paths(tmp_path)
-    with pytest.raises(DownloadError):
+    with pytest.raises(DownloadError) as exc:
         download_pptx(
             "https://storage.example.com/fake.pptx",
             paths,
             _settings(tmp_path),
             client=_client(handler),
         )
+    assert exc.value.user_message == "The downloaded file is not a valid PowerPoint file."
+
+
+def test_invalid_zip_download_is_rejected(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=invalid_zip_with_magic_bytes())
+
+    paths = _paths(tmp_path)
+    with pytest.raises(DownloadError) as exc:
+        download_pptx(
+            "https://storage.example.com/broken.pptx",
+            paths,
+            _settings(tmp_path),
+            client=_client(handler),
+        )
+    assert exc.value.user_message == "The PowerPoint file is not a valid package."
+    assert not paths.source_pptx.exists()
+
+
+def test_missing_parts_download_is_rejected(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=zip_missing_presentation_bytes())
+
+    paths = _paths(tmp_path)
+    with pytest.raises(DownloadError) as exc:
+        download_pptx(
+            "https://storage.example.com/empty.pptx",
+            paths,
+            _settings(tmp_path),
+            client=_client(handler),
+        )
+    assert (
+        exc.value.user_message
+        == "The PowerPoint file is missing required package parts."
+    )
+
+
+def test_password_protected_download_is_rejected(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=encrypted_pptx_bytes())
+
+    paths = _paths(tmp_path)
+    with pytest.raises(DownloadError) as exc:
+        download_pptx(
+            "https://storage.example.com/secret.pptx",
+            paths,
+            _settings(tmp_path),
+            client=_client(handler),
+        )
+    assert exc.value.user_message == "The PowerPoint file is password-protected."

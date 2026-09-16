@@ -58,6 +58,7 @@ class FakePowerPoint:
     closed: int = 0
     quit_calls: int = 0
     fail_on: str | None = None
+    last_timeout_s: float | None = None
 
     def start(self) -> None:
         from utils.exceptions import PowerPointAutomationError
@@ -66,12 +67,13 @@ class FakePowerPoint:
             raise PowerPointAutomationError("fake start failure")
         self.started = True
 
-    def open(self, path) -> None:
+    def open(self, path, timeout_s: float | None = None) -> None:
         from utils.exceptions import PowerPointAutomationError
 
         if self.fail_on == "open":
             raise PowerPointAutomationError("fake open failure")
         self.opened.append(str(path))
+        self.last_timeout_s = timeout_s
 
     def close(self) -> None:
         self.closed += 1

@@ -73,6 +73,57 @@ python main.py
 
 or `python run.py`. The process polls forever until SIGINT/SIGTERM.
 
+## Local laptop test (no Node cron)
+
+Give a PPTX on the Windows machine. This does **not** GET a job from Node. It copies the file, optionally opens PowerPoint so you can see the window, publishes (fake iSpring by default), uploads to `LOCAL_STORAGE_ROOT`, then serves the folder on localhost and checks that `index.html` loads.
+
+```bat
+copy .env.example .env
+```
+
+In `.env` for the laptop:
+
+```bat
+APP_ENV=development
+BACKEND_BASE_URL=http://127.0.0.1:9
+TEMP_ROOT=C:\ppt-automation\jobs
+LOG_ROOT=C:\ppt-automation\logs
+STORAGE_BACKEND=local_fs
+LOCAL_STORAGE_ROOT=C:\ppt-automation\cdn
+LOCAL_STORAGE_PUBLIC_BASE_URL=http://127.0.0.1/cdn
+MIN_FREE_DISK_GB=1
+ISPRING_ADAPTER=fake
+```
+
+Then:
+
+```bat
+python scripts\process_local.py --pptx "C:\test\sample.pptx" --queue-id 101 --material-id 5001 --material-name "Biology" --institution-name "ABC College"
+```
+
+Watch the console. On Windows, PowerPoint should open unless you pass `--skip-powerpoint`.
+
+Success prints `LOCAL RUN PASSED` plus `local_index=` and `checked_url=`. Open `C:\ppt-automation\cdn\ppt\5001\index.html` in a browser.
+
+Add `--playwright` to also load the page in Chromium. Add `--real-ispring` only after the iSpring adapter is implemented.
+
+**This default path uses fake iSpring HTML.** It proves copy → upload → page check. It does not convert your slides until `--real-ispring` works.
+
+Logs: `C:\ppt-automation\logs\worker.log`. Copy failures from that file back to the Mac.
+
+## Local iSpring Cloud test (macOS Chrome)
+
+Playwright can drive the **iSpring Cloud website** in Google Chrome. It cannot drive the PowerPoint / iSpring Suite desktop ribbon on macOS. This script does not start the poller and does not change any cloud content.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python scripts/test_ispring_cloud.py
+```
+
+Chrome opens visibly with a persistent profile under `test-artifacts/chrome-profile`. If a login, SSO, or MFA page appears, complete it in Chrome, then press Enter in the terminal. The script searches for `new ppt migration`, opens the first `demo academy` material, prints the title and URL, and writes screenshots plus a Playwright trace under `test-artifacts/ispring-cloud/<timestamp>/`.
+
 ## GET job mapping
 
 The client accepts a JSON object (or `{ "job": { ... } }`) with:
