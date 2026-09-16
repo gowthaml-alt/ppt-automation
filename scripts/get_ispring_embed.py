@@ -39,7 +39,6 @@ from browser_test.ispring_cloud import (  # noqa: E402
     name_pattern,
     open_cloud_library,
     open_ispring_cloud,
-    search_library,
     wait_for_app_ready,
     wait_for_visible_text,
 )
@@ -85,60 +84,152 @@ def click_by_role(page, pattern, roles=("button", "menuitem", "link", "tab"), wh
     return False
 
 
+def centre_mouse(page) -> None:
+    try:
+        size = page.viewport_size or {"width": 1200, "height": 800}
+        page.mouse.move(size["width"] / 2, size["height"] / 2)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def scroll_hunt(page, name: str, tries: int = 40):
+    """Find a row by name, scrolling the list until it shows up.
+
+    The library is a long list, not a search box, so the only way to reach a
+    row further down is to keep scrolling and looking.
+    """
+    pattern = name_pattern(name)
+    for attempt in range(tries):
+        for frame in _frames(page):
+            found = visible_or_none(frame.get_by_text(pattern))
+            if found is not None:
+                try:
+                    found.scroll_into_view_if_needed(timeout=3000)
+                except Exception:  # noqa: BLE001
+                    pass
+                if attempt:
+                    print(f"[ok  ] found {name!r} after {attempt} scrolls")
+                else:
+                    print(f"[ok  ] found {name!r} without scrolling")
+                return found
+        centre_mouse(page)
+        try:
+            page.mouse.wheel(0, 700)
+        except Exception:  # noqa: BLE001
+            break
+        page.wait_for_timeout(400)
+    return None
+
+
+def enter_folder(page, folder: str) -> bool:
+    """Open the institution's folder, where its materials live."""
+    row = scroll_hunt(page, folder)
+    if row is None:
+        return False
+    for action in ("dblclick", "click"):
+        try:
+            getattr(row, action)()
+            page.wait_for_timeout(2500)
+            print(f"[ok  ] opened folder {folder!r} ({action})")
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def menu_items(page) -> list[str]:
+    names = []
+    for frame in _frames(page):
+        for role in ("menuitem", "option", "button", "link"):
+            locator = frame.get_by_role(role)
+            try:
+                count = locator.count()
+            except Exception:  # noqa: BLE001
+                continue
+            for index in range(min(count, 40)):
+                item = locator.nth(index)
+                try:
+                    if not item.is_visible():
+                        continue
+                    label = (item.inner_text() or "").strip()
+                except Exception:  # noqa: BLE001
+                    continue
+                if label and label not in names:
+                    names.append(label)
+    return names
+
+
 def open_row_menu(page, material: str) -> bool:
     """Open the three-dot menu on the material's row.
 
     The button usually only appears once the row is hovered, and its label
     varies, so hover the row first and then take the nearest menu-ish button.
     """
-    row = None
-    for frame in _frames(page):
-        candidate = visible_or_none(frame.get_by_text(name_pattern(material)))
-        if candidate is not None:
-            row = candidate
-            break
+    row = scroll_hunt(page, material)
     if row is None:
         return False
     try:
         row.hover()
+        page.wait_for_timeout(500)
         print("[ok  ] hovered the material row")
     except Exception:  # noqa: BLE001
         pass
 
     try:
         box = row.bounding_box() or {}
-        row_middle = box.get("y", 0) + box.get("height", 0) / 2
     except Exception:  # noqa: BLE001
-        row_middle = None
+        box = {}
+    top = box.get("y", 0)
+    bottom = top + box.get("height", 0)
 
-    best = None
-    best_gap = None
+    # The three dots sit on the same row, to the right of the name. Keeping to
+    # the row's own vertical band avoids grabbing a toolbar button elsewhere.
+    candidates = []
     for frame in _frames(page):
-        locator = frame.get_by_role("button", name=MENU_BUTTON_RE)
-        try:
-            count = locator.count()
-        except Exception:  # noqa: BLE001
-            continue
-        for index in range(count):
-            item = locator.nth(index)
+        for locator in (
+            frame.get_by_role("button", name=MENU_BUTTON_RE),
+            frame.get_by_role("button"),
+        ):
             try:
-                if not item.is_visible():
-                    continue
-                if row_middle is None:
-                    best = item
-                    break
-                item_box = item.bounding_box() or {}
-                middle = item_box.get("y", 0) + item_box.get("height", 0) / 2
-                gap = abs(middle - row_middle)
-                if best_gap is None or gap < best_gap:
-                    best, best_gap = item, gap
+                count = locator.count()
             except Exception:  # noqa: BLE001
                 continue
-    if best is None:
+            for index in range(min(count, 60)):
+                item = locator.nth(index)
+                try:
+                    if not item.is_visible():
+                        continue
+                    item_box = item.bounding_box() or {}
+                except Exception:  # noqa: BLE001
+                    continue
+                middle = item_box.get("y", 0) + item_box.get("height", 0) / 2
+                if box and not (top - 4 <= middle <= bottom + 4):
+                    continue
+                candidates.append((item_box.get("x", 0), item))
+            if candidates:
+                break
+        if candidates:
+            break
+    if not candidates:
+        print("[FAIL] no button on the material's row")
         return False
-    best.click()
-    print(f"[ok  ] opened the row menu (gap {best_gap})")
+
+    # Right-most button on the row is the three-dot menu.
+    candidates.sort(key=lambda pair: pair[0])
+    candidates[-1][1].click()
+    page.wait_for_timeout(1200)
+    items = menu_items(page)
+    print(f"[ok  ] opened the row menu; items: {items}")
     return True
+
+
+def open_share(page, artifacts) -> bool:
+    """Click Share, falling back to the row's right-click menu."""
+    if click_by_role(page, SHARE_RE, what="Share"):
+        return True
+    print(f"[FAIL] no Share in this menu; saw: {menu_items(page)}")
+    _dump_page(page, artifacts, "04-no-share")
+    return False
 
 
 def read_embed_code(page) -> str:
@@ -243,29 +334,28 @@ def share_flow(page, context, material: str, institution: str, artifacts) -> str
     dismiss_cookie_dialogs(page)
     _save_screenshot(page, artifacts, "01-library")
 
-    if not wait_for_visible_text(page, name_pattern(material), 6_000):
-        search_library(page, material)
-        page = active_page(context, page)
-        wait_for_app_ready(page, timeout_ms=20_000)
-    if not wait_for_visible_text(page, name_pattern(material), 15_000):
+    # No searching: the material is found by walking into the institution's
+    # folder and scrolling the list, the way it is done by hand.
+    if not wait_for_visible_text(page, name_pattern(material), 5_000):
         if institution:
-            search_library(page, institution)
+            if not enter_folder(page, institution):
+                _dump_page(page, artifacts, "02-no-folder")
+                raise ISpringCloudProbeError(
+                    f"could not open the folder {institution!r} in the library"
+                )
             wait_for_app_ready(page, timeout_ms=20_000)
-            search_library(page, material)
-            wait_for_app_ready(page, timeout_ms=20_000)
-    _save_screenshot(page, artifacts, "02-material-found")
-    _dump_page(page, artifacts, "02-material-found")
+    _save_screenshot(page, artifacts, "02-folder")
+    _dump_page(page, artifacts, "02-folder")
 
     if not open_row_menu(page, material):
         _dump_page(page, artifacts, "03-no-row-menu")
         raise ISpringCloudProbeError(
-            f"could not find the three-dot menu for {material!r}"
+            f"could not open the three-dot menu for {material!r} — is that the "
+            "name it was published under?"
         )
-    page.wait_for_timeout(1200)
     _save_screenshot(page, artifacts, "03-row-menu")
 
-    if not click_by_role(page, SHARE_RE, what="Share"):
-        _dump_page(page, artifacts, "04-no-share")
+    if not open_share(page, artifacts):
         raise ISpringCloudProbeError("no Share item in the menu")
     page.wait_for_timeout(2000)
     _save_screenshot(page, artifacts, "04-share-dialog")
