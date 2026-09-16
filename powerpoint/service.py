@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import subprocess
 import sys
 import threading
@@ -25,6 +27,7 @@ USER_DAMAGED = "The PowerPoint file is damaged and could not be opened."
 USER_OPEN_TIMEOUT = "Opening the PowerPoint file timed out."
 USER_SAVE_FAILED = "The repaired PowerPoint file could not be saved."
 PP_SAVE_AS_OPEN_XML_PRESENTATION = 24
+REPAIRED_SUFFIX = ".repaired"
 
 
 def terminate_powerpoint_processes() -> int:
@@ -129,7 +132,7 @@ class PowerPointService:
             log_open("timeout")
             self._cleanup_failed_open()
 
-        open2007 = getattr(getattr(self._app, "Presentations", None), "Open2007", None)
+        open2007 = self._open2007_callable()
         if open2007 is None:
             log_open("damaged")
             self._cleanup_failed_open()
@@ -248,6 +251,9 @@ class PowerPointService:
             user_message=USER_PROTECTED_VIEW,
         )
 
+    def _open2007_callable(self):
+        return getattr(getattr(self._app, "Presentations", None), "Open2007", None)
+
     def _save_repaired_if_needed(self, dest: Path) -> bool:
         presentation = self._presentation
         if presentation is None or bool(getattr(presentation, "Saved", True)):
@@ -256,27 +262,85 @@ class PowerPointService:
             presentation.ReadOnlyRecommended = False
         except Exception:
             pass
+        if not _is_read_only(presentation):
+            try:
+                presentation.Save()
+                return True
+            except Exception as exc:
+                if not _is_readonly_save_error(exc):
+                    raise PowerPointAutomationError(
+                        f"Save after repair failed: {exc}",
+                        user_message=USER_SAVE_FAILED,
+                    ) from exc
+        logger.info(
+            "repaired presentation is read-only; saving under a new name",
+            extra={"stage": "powerpoint_open"},
+        )
+        return self._save_under_new_name(dest)
+
+    def _save_under_new_name(self, dest: Path) -> bool:
+        """Write the repair to a sibling file, then swap it onto ``dest``.
+
+        PowerPoint refuses ``SaveAs`` back onto the path a repaired
+        presentation was opened from ("must be saved with a different name"),
+        so the repair is saved beside it, the presentation is closed to release
+        both files, the sibling replaces the working copy, and the now-clean
+        file is reopened without repair.
+        """
+        presentation = self._presentation
+        if presentation is None:
+            raise PowerPointAutomationError(
+                "no presentation open to save",
+                user_message=USER_SAVE_FAILED,
+            )
+        repaired = dest.with_name(f"{dest.stem}{REPAIRED_SUFFIX}{dest.suffix}")
         try:
-            presentation.Save()
-            return True
-        except Exception as exc:
-            if not _is_readonly_save_error(exc):
-                raise PowerPointAutomationError(
-                    f"Save after repair failed: {exc}",
-                    user_message=USER_SAVE_FAILED,
-                ) from exc
-            logger.info(
-                "Save was read-only; writing working copy with SaveAs",
+            if repaired.exists():
+                repaired.unlink()
+        except OSError:
+            logger.warning(
+                "could not remove stale repaired copy",
                 extra={"stage": "powerpoint_open"},
+                exc_info=True,
             )
         try:
-            presentation.SaveAs(str(dest), PP_SAVE_AS_OPEN_XML_PRESENTATION)
-            return True
+            presentation.SaveAs(str(repaired), PP_SAVE_AS_OPEN_XML_PRESENTATION)
         except Exception as exc:
             raise PowerPointAutomationError(
                 f"SaveAs after repair failed: {exc}",
                 user_message=USER_SAVE_FAILED,
             ) from exc
+
+        self.close()
+
+        try:
+            _clear_read_only(dest)
+            os.replace(repaired, dest)
+        except OSError as exc:
+            raise PowerPointAutomationError(
+                f"could not swap repaired copy onto the working file: {exc}",
+                user_message=USER_SAVE_FAILED,
+            ) from exc
+
+        open2007 = self._open2007_callable()
+        if open2007 is None:
+            raise PowerPointAutomationError(
+                "Presentations.Open2007 is not available for reopen",
+                user_message=USER_SAVE_FAILED,
+            )
+        try:
+            self._presentation = open2007(str(dest), False, False, True, False)
+        except Exception as exc:
+            raise PowerPointAutomationError(
+                f"reopening the repaired presentation failed: {exc}",
+                user_message=USER_SAVE_FAILED,
+            ) from exc
+        self._reject_protected_view()
+        logger.info(
+            "repaired presentation saved and reopened",
+            extra={"stage": "powerpoint_open"},
+        )
+        return True
 
     def _cleanup_failed_open(self) -> None:
         if self._open_cleanup_done:
@@ -323,6 +387,24 @@ def _result_for_user_message(user_message: str | None) -> str:
         USER_SAVE_FAILED: "save_failed",
     }
     return mapping.get(user_message or "", "damaged")
+
+
+def _is_read_only(presentation) -> bool:
+    try:
+        return bool(presentation.ReadOnly)
+    except Exception:
+        return False
+
+
+def _clear_read_only(path: Path) -> None:
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE | stat.S_IWUSR)
+    except OSError:
+        logger.warning(
+            "could not clear read-only flag before swapping repaired copy",
+            extra={"stage": "powerpoint_open"},
+            exc_info=True,
+        )
 
 
 def _is_readonly_save_error(exc: BaseException) -> bool:

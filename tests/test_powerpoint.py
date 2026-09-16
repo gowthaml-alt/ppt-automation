@@ -54,9 +54,11 @@ class FakePresentation:
         saved: bool = True,
         save_error: Exception | None = None,
         save_as_error: Exception | None = None,
+        read_only: bool = False,
     ) -> None:
         self.FullName = str(path)
         self.Saved = saved
+        self.ReadOnly = read_only
         self.save_error = save_error
         self.save_as_error = save_as_error
         self.save_calls = 0
@@ -77,6 +79,7 @@ class FakePresentation:
         Path(FileName).write_bytes(b"repaired-working-copy")
         self.FullName = str(FileName)
         self.Saved = True
+        self.ReadOnly = False
 
     def Close(self) -> None:
         self.closed += 1
@@ -205,7 +208,7 @@ def test_repairable_file_is_saved_to_working_copy_only(tmp_path, caplog):
     assert records[-1].open_result == "success"
 
 
-def test_readonly_repair_is_saved_as_working_copy(tmp_path, caplog):
+def test_readonly_repair_is_saved_under_a_new_name_then_swapped(tmp_path, caplog):
     caplog.set_level(logging.INFO)
     original = tmp_path / "input" / "source.pptx"
     original.parent.mkdir(parents=True)
@@ -220,16 +223,55 @@ def test_readonly_repair_is_saved_as_working_copy(tmp_path, caplog):
             "saved with a different name."
         ),
     )
+    presentations = FakePresentations(presentation)
     killed: list[int] = []
-    _service(tmp_path, FakeApp(FakePresentations(presentation)), killed).open(working)
+    _service(tmp_path, FakeApp(presentations), killed).open(working)
+    repaired = working.resolve().with_name("source.repaired.pptx")
     assert presentation.save_calls == 1
-    assert presentation.save_as_calls == [(str(working.resolve()), 24)]
+    assert presentation.save_as_calls == [(str(repaired), 24)]
+    assert presentation.closed == 1
+    assert not repaired.exists()
     assert working.read_bytes() == b"repaired-working-copy"
     assert original.read_bytes() == original_bytes
+    assert [call["OpenAndRepair"] for call in presentations.calls] == [True, False]
+    assert presentations.calls[-1]["FileName"] == str(working.resolve())
     assert killed == []
     records = [r for r in caplog.records if getattr(r, "open_result", None)]
     assert records[-1].saved is True
     assert records[-1].open_result == "success"
+
+
+def test_read_only_presentation_skips_save_and_goes_straight_to_save_as(tmp_path):
+    working = _working_pptx(tmp_path)
+    presentation = FakePresentation(working, saved=False, read_only=True)
+    presentations = FakePresentations(presentation)
+    _service(tmp_path, FakeApp(presentations)).open(working)
+    repaired = working.resolve().with_name("source.repaired.pptx")
+    assert presentation.save_calls == 0
+    assert presentation.save_as_calls == [(str(repaired), 24)]
+    assert working.read_bytes() == b"repaired-working-copy"
+    assert not repaired.exists()
+
+
+def test_save_as_failure_after_readonly_save_terminates_powerpoint(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    working = _working_pptx(tmp_path)
+    presentation = FakePresentation(
+        working,
+        saved=False,
+        read_only=True,
+        save_as_error=RuntimeError("disk full"),
+    )
+    app = FakeApp(FakePresentations(presentation))
+    killed: list[int] = []
+    with pytest.raises(PowerPointAutomationError) as exc:
+        _service(tmp_path, app, killed).open(working)
+    assert (
+        exc.value.user_message == "The repaired PowerPoint file could not be saved."
+    )
+    assert killed == [1]
+    records = [r for r in caplog.records if getattr(r, "open_result", None)]
+    assert records[-1].open_result == "save_failed"
 
 
 def test_unrepairable_file_fails_and_terminates_powerpoint(tmp_path, caplog):
