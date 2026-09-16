@@ -131,6 +131,39 @@ def _walk(
             return
 
 
+def _find(
+    element,
+    needle: str,
+    max_depth: int,
+    path: list[str],
+    hits: list[str],
+    depth: int = 0,
+) -> None:
+    """Report every element whose name contains ``needle``, with its path.
+
+    Web views are searched too: when the target sits inside one, its path is
+    exactly what tells us whether it can be reached at all.
+    """
+    if len(hits) >= 200 or depth > max_depth:
+        return
+    name = _text(getattr(element, "name", ""))
+    here = _describe(element)
+    if needle.lower() in name.lower():
+        hits.append("    MATCH:")
+        for level, step in enumerate(path):
+            hits.append("      " + ("  " * level) + step)
+        hits.append("      " + ("  " * len(path)) + here)
+        hits.append("")
+    try:
+        children = element.children()
+    except Exception:  # noqa: BLE001
+        return
+    path.append(here)
+    for child in children:
+        _find(child, needle, max_depth, path, hits, depth + 1)
+    path.pop()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dump iSpring/PowerPoint UI trees.")
     parser.add_argument("--label", default="ui", help="Name for this dump")
@@ -178,6 +211,15 @@ def main(argv: list[str] | None = None) -> int:
         "--include-webviews",
         action="store_true",
         help="Also walk inside embedded browser panes (very long output)",
+    )
+    parser.add_argument(
+        "--find",
+        default="",
+        help=(
+            "Instead of dumping whole trees, report only elements whose name "
+            "contains this text, with the path down to each one. Searches "
+            "inside web views too."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -281,7 +323,12 @@ def _snapshot(
 
         walked += 1
         lines: list[str] = []
-        _walk(element, 0, args.depth, lines, skip_web_views)
+        if args.find:
+            _find(element, args.find, args.depth, [], lines)
+            if not lines:
+                lines.append(f"    <nothing matching {args.find!r} in this window>")
+        else:
+            _walk(element, 0, args.depth, lines, skip_web_views)
         sections.append("=" * 78)
         sections.append(f"window: {title!r}  ({process_name}, pid {pid})")
         sections.append("-" * 78)
