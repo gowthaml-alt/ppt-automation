@@ -268,60 +268,91 @@ def is_on(control) -> bool | None:
         return None
 
 
-def make_viewable_via_link(page, artifacts) -> bool:
-    """Turn on 'Make viewable via link'.
-
-    Until this is on, the content is private and there is no embed code to
-    read, so this has to happen before looking for the iframe.
-    """
-    already = True
+def is_public(page) -> bool:
+    """True only when the dialog no longer says the content is private."""
     for frame in _frames(page):
         if visible_or_none(frame.get_by_text(NOT_PUBLIC_RE)) is not None:
-            already = False
+            return False
+    return True
+
+
+def ancestors(locator, levels: int = 4):
+    """The control and its wrappers, outermost last.
+
+    The real input is covered by styled divs, so the thing that actually takes
+    the click is usually a parent, not the input itself.
+    """
+    chain = [locator]
+    current = locator
+    for _ in range(levels):
+        try:
+            current = current.locator("xpath=..")
+            chain.append(current)
+        except Exception:  # noqa: BLE001
             break
-    if already:
+    return chain
+
+
+def toggle_candidates(page):
+    """Controls that might be the 'Make viewable via link' switch."""
+    found = []
+    for frame in _frames(page):
+        for getter in (
+            lambda: frame.get_by_role("switch", name=PUBLIC_TOGGLE_RE),
+            lambda: frame.get_by_role("checkbox", name=PUBLIC_TOGGLE_RE),
+            lambda: frame.get_by_role("switch"),
+            lambda: frame.get_by_role("checkbox"),
+            lambda: frame.locator("input[type=checkbox]"),
+        ):
+            try:
+                locator = getter()
+                count = locator.count()
+            except Exception:  # noqa: BLE001
+                continue
+            for index in range(min(count, 6)):
+                found.append(locator.nth(index))
+    return found
+
+
+def make_viewable_via_link(page, artifacts) -> bool:
+    """Turn on 'Make viewable via link' and prove it went on.
+
+    The embed code is shown even while the content is private, greyed out and
+    pointing at something nobody can open. So this must succeed before the
+    iframe is worth reading, and it is verified rather than assumed.
+    """
+    if is_public(page):
         print("[ok  ] content is already viewable via link")
         return True
 
-    switch = None
-    for frame in _frames(page):
-        for role in ("switch", "checkbox"):
-            found = visible_or_none(frame.get_by_role(role, name=PUBLIC_TOGGLE_RE))
-            if found is not None:
-                switch = found
-                break
-            found = visible_or_none(frame.get_by_role(role))
-            if found is not None and switch is None:
-                switch = found
-        if switch is not None:
-            break
+    for round_number in range(1, 4):
+        for candidate in toggle_candidates(page):
+            for depth, target in enumerate(ancestors(candidate)):
+                try:
+                    if not target.is_visible():
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                if not safe_click(target, f"link toggle (wrapper {depth})"):
+                    continue
+                page.wait_for_timeout(2000)
+                if is_public(page):
+                    print("[ok  ] turned on 'Make viewable via link'")
+                    return True
+        # The word next to the switch is clickable in some builds.
+        for frame in _frames(page):
+            label = visible_or_none(frame.get_by_text(re.compile(r"^\s*off\s*$", re.I)))
+            if label is not None and safe_click(label, "the Off label"):
+                page.wait_for_timeout(2000)
+                if is_public(page):
+                    print("[ok  ] turned on 'Make viewable via link' (label)")
+                    return True
+        print(f"[FAIL] toggle still off after attempt {round_number}")
+        page.wait_for_timeout(1500)
 
-    if switch is None:
-        # Some builds use a plain clickable label rather than a real switch.
-        if click_by_role(
-            page, PUBLIC_TOGGLE_RE, roles=("button", "link"), what="viewable via link"
-        ):
-            page.wait_for_timeout(2500)
-            return True
-        print("[FAIL] could not find the 'Make viewable via link' toggle")
-        _dump_page(page, artifacts, "04b-no-toggle")
-        return False
-
-    state = is_on(switch)
-    if state:
-        print("[ok  ] link sharing already on")
-        return True
-    if not safe_click(switch, "'Make viewable via link' toggle"):
-        return False
-    page.wait_for_timeout(2500)
-
-    for frame in _frames(page):
-        if visible_or_none(frame.get_by_text(NOT_PUBLIC_RE)) is not None:
-            print("[FAIL] still shows 'not publicly accessible' after the toggle")
-            _dump_page(page, artifacts, "04c-toggle-did-not-take")
-            return False
-    print("[ok  ] turned on 'Make viewable via link'")
-    return True
+    _dump_page(page, artifacts, "04c-toggle-stuck-off")
+    _save_screenshot(page, artifacts, "04c-toggle-stuck-off")
+    return False
 
 
 def open_share(page, artifacts) -> bool:
@@ -462,13 +493,17 @@ def share_flow(page, context, material: str, institution: str, artifacts) -> str
     _save_screenshot(page, artifacts, "04-share-dialog")
     _dump_page(page, artifacts, "04-share-dialog")
 
-    make_viewable_via_link(page, artifacts)
+    if not make_viewable_via_link(page, artifacts):
+        raise ISpringCloudProbeError(
+            "'Make viewable via link' could not be switched on. The embed code "
+            "on screen points at content nobody can open, so it is not worth "
+            "returning — see 04c-toggle-stuck-off.png"
+        )
     page.wait_for_timeout(2000)
     _save_screenshot(page, artifacts, "04d-after-toggle")
     _dump_page(page, artifacts, "04d-after-toggle")
 
-    # Once sharing is on, the embed code is often already on the dialog, so
-    # read before clicking anything — one less thing to go wrong.
+    # With sharing on, the embed code is usually already on the dialog.
     embed = read_embed_code(page)
     if embed:
         print("[ok  ] embed code was already on the dialog")
