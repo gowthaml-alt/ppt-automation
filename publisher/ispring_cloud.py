@@ -743,10 +743,19 @@ def close_powerpoint(app, pptx: Path) -> None:
 
 
 def _frames(page):
+    """The page, then any iframes in it.
+
+    The page's own main frame is left out: it is the same document as the
+    page, and including it searches — and dumps — everything twice.
+    """
     frames = [page]
     try:
+        main = page.main_frame
+    except Exception:  # noqa: BLE001
+        main = None
+    try:
         for frame in page.frames:
-            if frame not in frames:
+            if frame is not main and frame not in frames:
                 frames.append(frame)
     except Exception:  # noqa: BLE001
         pass
@@ -820,6 +829,230 @@ def scope(page):
     return root if root is not None else page
 
 
+# ---------------------------------------------------------------------------
+# Browser dump
+#
+# The desktop half has scripts/probe_ispring_ui.py to print a window's whole
+# control tree when something is not where it was expected. This is the same
+# thing for the website: it writes out every visible element, every open
+# popup and the page's text, so a failed run can be read afterwards instead
+# of guessed at.
+# ---------------------------------------------------------------------------
+
+DUMP_JS = r"""
+() => {
+  const MAX_ROWS = 3000;
+  const rows = [];
+  const isVisible = (el) => {
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return false;
+      const s = window.getComputedStyle(el);
+      if (s.visibility === 'hidden' || s.display === 'none') return false;
+      if (parseFloat(s.opacity || '1') < 0.05) return false;
+      return true;
+    } catch (e) { return false; }
+  };
+  const ownText = (el) => {
+    let out = '';
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3) out += node.nodeValue;
+    }
+    return out.replace(/\s+/g, ' ').trim();
+  };
+  const interesting = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (['a','button','input','textarea','select','summary','label','iframe'].includes(tag)) return true;
+    if (el.hasAttribute('role') || el.hasAttribute('aria-label') || el.hasAttribute('data-at')) return true;
+    if (el.getAttribute('contenteditable') === 'true') return true;
+    return ownText(el).length > 0;
+  };
+  const describe = (el, depth) => {
+    const tag = el.tagName.toLowerCase();
+    let head = tag;
+    if (el.id) head += '#' + el.id;
+    const cls = (el.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean).slice(0, 3);
+    if (cls.length) head += '.' + cls.join('.');
+    const attrs = [];
+    const wanted = ['role','data-at','aria-label','aria-checked','aria-expanded',
+                    'aria-hidden','title','placeholder','href','type','name',
+                    'disabled','tabindex'];
+    for (const name of wanted) {
+      if (el.hasAttribute(name)) {
+        let v = el.getAttribute(name) || '';
+        if (v.length > 140) v = v.slice(0, 140) + '…';
+        attrs.push(name + '=' + JSON.stringify(v));
+      }
+    }
+    if ((tag === 'input' || tag === 'textarea') && el.value) {
+      attrs.push('value=' + JSON.stringify(String(el.value).slice(0, 400)));
+    }
+    if (tag === 'input' && el.type === 'checkbox') attrs.push('checked=' + el.checked);
+    const r = el.getBoundingClientRect();
+    const rect = '@' + Math.round(r.x) + ',' + Math.round(r.y) +
+                 ' ' + Math.round(r.width) + 'x' + Math.round(r.height);
+    let text = ownText(el);
+    if (text.length > 180) text = text.slice(0, 180) + '…';
+    return '  '.repeat(Math.min(depth, 18)) + head +
+      (attrs.length ? ' [' + attrs.join(' ') + ']' : '') + ' ' + rect +
+      (text ? '  "' + text + '"' : '');
+  };
+  const walk = (el, depth) => {
+    if (rows.length > MAX_ROWS) return;
+    for (const child of el.children) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === 'script' || tag === 'style' || tag === 'noscript') continue;
+      if (!isVisible(child)) continue;
+      if (interesting(child)) {
+        rows.push(describe(child, depth));
+        walk(child, depth + 1);
+      } else {
+        walk(child, depth);
+      }
+    }
+  };
+  if (document.body) walk(document.body, 0);
+  const values = [];
+  for (const el of document.querySelectorAll('input, textarea')) {
+    if (el.value) values.push((el.getAttribute('aria-label') || el.getAttribute('name') ||
+                               el.type || 'field') + ' = ' + String(el.value).slice(0, 500));
+  }
+  return {
+    url: location.href,
+    title: document.title,
+    size: window.innerWidth + 'x' + window.innerHeight,
+    tree: rows,
+    values: values,
+    text: (document.body ? document.body.textContent || '' : '').replace(/\s+/g, ' ').trim().slice(0, 20000),
+  };
+}
+"""
+
+URL_RE = re.compile(r"https?://[^\s\"'<>\\]+", re.I)
+
+
+def dump_always() -> bool:
+    """ISPRING_DUMP=1 dumps the browser on every run, not only on failure."""
+    return os.environ.get("ISPRING_DUMP", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def dump_dir() -> Path:
+    """Where browser dumps are written. ISPRING_DUMP_DIR overrides it."""
+    raw = os.environ.get("ISPRING_DUMP_DIR", "")
+    folder = Path(raw) if raw else Path.cwd() / "test-artifacts"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        folder = Path(os.environ.get("TEMP", ".")).resolve()
+    return folder
+
+
+def _popup_sections(page) -> list[str]:
+    """Every open popup, with its markup — the embed code lives in one."""
+    sections: list[str] = []
+    for frame in _frames(page):
+        for selector in POPUP_SELECTORS:
+            try:
+                locator = frame.locator(selector)
+                count = locator.count()
+            except Exception:  # noqa: BLE001
+                continue
+            for index in range(min(count, 6)):
+                item = locator.nth(index)
+                try:
+                    if not item.is_visible():
+                        continue
+                    text = item.evaluate("el => el.textContent || ''")
+                    markup = item.evaluate("el => el.outerHTML || ''")
+                except Exception:  # noqa: BLE001
+                    continue
+                flat = re.sub(r"[ \t]+", " ", text or "").strip()[:4000]
+                sections.append(
+                    f"--- popup {selector} [{index}] ---\n"
+                    f"text: {flat}\n"
+                    f"html: {markup[:8000]}"
+                )
+    return sections
+
+
+def dump_page(page, label: str = "page") -> str:
+    """Write the whole state of the browser to a text file.
+
+    Returns the file path, or "" when nothing could be written. Never raises:
+    a dump is diagnostics, and failing to take one must not replace the error
+    that prompted it.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", label).strip("-") or "page"
+    target = dump_dir() / f"ispring-browser-{safe}-{stamp}.txt"
+    lines = [
+        "=" * 78,
+        f"iSpring browser dump: {label}",
+        f"taken: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "=" * 78,
+    ]
+    try:
+        lines.append(f"page url:   {page.url}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        popups = _popup_sections(page)
+    except Exception as exc:  # noqa: BLE001
+        popups = [f"(popup scan failed: {exc})"]
+    lines.append("")
+    lines.append(f"OPEN POPUPS: {len(popups)}")
+    lines.extend(popups)
+
+    urls: set[str] = set()
+    for index, frame in enumerate(_frames(page)):
+        try:
+            data = frame.evaluate(DUMP_JS)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"\n--- frame {index}: could not be read ({exc}) ---")
+            continue
+        lines.append("")
+        lines.append("=" * 78)
+        lines.append(f"FRAME {index}: {data.get('title', '')}")
+        lines.append(f"url:  {data.get('url', '')}")
+        lines.append(f"size: {data.get('size', '')}")
+        lines.append("=" * 78)
+        values = data.get("values") or []
+        if values:
+            lines.append("")
+            lines.append("-- field values --")
+            lines.extend(f"  {value}" for value in values)
+        lines.append("")
+        lines.append("-- visible elements --")
+        lines.extend(data.get("tree") or [])
+        text = data.get("text") or ""
+        lines.append("")
+        lines.append("-- page text --")
+        lines.append(text)
+        for match in URL_RE.finditer(text):
+            urls.add(match.group(0))
+
+    interesting = sorted(
+        url for url in urls if re.search(r"embed|preview|player|share", url, re.I)
+    )
+    if interesting:
+        lines.append("")
+        lines.append("-- urls worth a look --")
+        lines.extend(f"  {url}" for url in interesting)
+
+    try:
+        target.write_text("\n".join(lines), encoding="utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        _warn("could not write the browser dump", error=str(exc))
+        return ""
+    try:
+        page.screenshot(path=str(target.with_suffix(".png")), full_page=False)
+    except Exception:  # noqa: BLE001
+        pass
+    _note("wrote a browser dump", file=str(target), label=label)
+    return str(target)
+
+
 def click_by_role(page, pattern, roles=("button", "menuitem", "link", "tab"), what=""):
     for frame in _frames(page):
         for role in roles:
@@ -877,11 +1110,42 @@ def enter_folder(page, folder: str) -> bool:
     return False
 
 
+def row_element(page, text_node):
+    """The whole list row that holds this text.
+
+    The name is a small span in the middle of a wide row, and the three dots
+    sit at the row's right edge. Measuring the span instead of the row is how
+    the menu of a neighbouring row gets opened, so climb until the element is
+    as wide as the list.
+    """
+    try:
+        width = (page.viewport_size or {}).get("width") or 1200
+    except Exception:  # noqa: BLE001
+        width = 1200
+    current = text_node
+    for _ in range(6):
+        try:
+            box = current.bounding_box() or {}
+        except Exception:  # noqa: BLE001
+            return text_node
+        if box.get("width", 0) >= width * 0.35:
+            return current
+        try:
+            parent = current.locator("xpath=..")
+            if not parent.count():
+                return current
+            current = parent.first
+        except Exception:  # noqa: BLE001
+            return current
+    return current
+
+
 def open_row_menu(page, material: str) -> bool:
     """Open the three-dot menu on the material's row."""
-    row = scroll_hunt(page, material)
-    if row is None:
+    found = scroll_hunt(page, material)
+    if found is None:
         return False
+    row = row_element(page, found)
     try:
         row.hover()
         page.wait_for_timeout(500)
@@ -915,6 +1179,13 @@ def open_row_menu(page, material: str) -> bool:
                 middle = item_box.get("y", 0) + item_box.get("height", 0) / 2
                 if box and not (top - 4 <= middle <= bottom + 4):
                     continue
+                # Inside the row horizontally too, or a toolbar button that
+                # happens to sit at the same height gets clicked instead.
+                if box:
+                    left = box.get("x", 0)
+                    right = left + box.get("width", 0)
+                    if not (left - 4 <= item_box.get("x", 0) <= right + 4):
+                        continue
                 candidates.append((item_box.get("x", 0), item))
             if candidates:
                 break
@@ -1337,6 +1608,62 @@ def open_result(page, name: str) -> bool:
     return False
 
 
+RECENT_RE = re.compile(r"^\s*recent\b", re.I)
+
+
+def open_recent(page) -> bool:
+    """Open the library's Recent view, where the newest material is first.
+
+    The deck was published seconds ago, so it is at the top of that list —
+    no searching and no scrolling.
+    """
+    if popup_root(page) is not None:
+        return False
+    if not click_by_role(
+        page, RECENT_RE, roles=("link", "button", "menuitem", "tab", "treeitem"),
+        what="Recent",
+    ):
+        return False
+    page.wait_for_timeout(2500)
+    _note("opened Recent")
+    return True
+
+
+def locate_material(page, material: str, institution: str) -> bool:
+    """Find the just-published material's row, however it can be found.
+
+    In order: search for it by name; search for the institution and open the
+    folder the search returns (the search lists the folder, not what is
+    inside it); Recent, where the newest is at the top; and finally walking
+    the library by hand.
+    """
+    if scroll_hunt(page, material, tries=2) is not None:
+        return True
+
+    if search_library(page, material):
+        if scroll_hunt(page, material, tries=3) is not None:
+            return True
+        # The result was the folder holding it, not the material.
+        if institution and open_result(page, institution):
+            if scroll_hunt(page, material, tries=8) is not None:
+                return True
+
+    if institution and search_library(page, institution):
+        if open_result(page, institution):
+            if scroll_hunt(page, material, tries=8) is not None:
+                return True
+
+    if open_recent(page) and scroll_hunt(page, material, tries=4) is not None:
+        _note("found it in Recent", material=material)
+        return True
+
+    if institution:
+        _note("falling back to walking the library", folder=institution)
+        if enter_folder(page, institution) and scroll_hunt(page, material, tries=10) is not None:
+            return True
+    return False
+
+
 COVER_RE = re.compile(r"edit cover image", re.I)
 COVER_DIALOG_RE = re.compile(r"cover image settings", re.I)
 SAVE_RE = re.compile(r"^\s*save\s*$", re.I)
@@ -1387,12 +1714,17 @@ def popup_with_text(page, pattern):
     return None
 
 
+FOLDER_MENU_RE = re.compile(r"invite|rename|move to|new folder", re.I)
+
+
 def open_share(page, material: str) -> bool:
     """Open the row's three-dot menu and click Share.
 
     The menu is drawn a moment after the click, and the first click sometimes
     only selects the row, so this looks a few times and falls back to the
-    right-click menu before giving up.
+    right-click menu before giving up. A menu with Invite and Rename but no
+    Share belongs to a folder, not to the material — that one is dismissed
+    and the row found again rather than clicked blindly.
     """
     if not open_row_menu(page, material):
         return False
@@ -1400,21 +1732,33 @@ def open_share(page, material: str) -> bool:
         page.wait_for_timeout(1200)
         if click_by_role(page, SHARE_RE, what="Share"):
             return True
+
+        labels = visible_menu_labels(page)[:20]
+        wrong_row = any(FOLDER_MENU_RE.search(label) for label in labels)
         _warn(
-            "no Share in the menu yet",
+            "the menu that opened has no Share",
             attempt=attempt,
-            items=visible_menu_labels(page)[:20],
+            folder_menu=wrong_row,
+            items=labels,
         )
+        # Whatever opened, get rid of it before trying again: a menu left
+        # standing swallows the next click.
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(600)
+        except Exception:  # noqa: BLE001
+            pass
+
         if attempt == 2:
-            row = scroll_hunt(page, material, tries=1)
-            if row is not None:
+            found = scroll_hunt(page, material, tries=1)
+            if found is not None:
                 try:
-                    row.click(button="right", timeout=4000)
+                    row_element(page, found).click(button="right", timeout=4000)
                     _note("tried the right-click menu")
                     continue
                 except Exception:  # noqa: BLE001
                     pass
-            open_row_menu(page, material)
+        open_row_menu(page, material)
     return False
 
 
@@ -1535,28 +1879,14 @@ def fetch_embed(
             _warn("that Chrome may not be signed in to iSpring Cloud")
 
         _note("browser is on", url=(page.url or "")[:200])
+        if dump_always():
+            dump_page(page, "library")
 
-        # The tab Manage Content opened is already in the right folder, so look
-        # there first, then search, and only scroll as a last resort.
-        found = scroll_hunt(page, material, tries=2) is not None
-
-        # Search finds the institution's folder, not what is inside it, so the
-        # folder is opened and the material looked for in there.
-        if not found and institution and search_library(page, institution):
-            if open_result(page, institution):
-                found = scroll_hunt(page, material, tries=8) is not None
-
-        # Some materials are found by name directly.
-        if not found and search_library(page, material):
-            found = scroll_hunt(page, material, tries=2) is not None
-
-        if not found and institution:
-            _note("falling back to walking the library", folder=institution)
-            if enter_folder(page, institution):
-                found = scroll_hunt(page, material, tries=8) is not None
-        if not found:
+        if not locate_material(page, material, institution):
+            dump = dump_page(page, "material-not-found")
             raise ISpringPublishingError(
-                f"{material!r} was not found in the library (url {page.url})",
+                f"{material!r} was not found in the library (url {page.url}); "
+                f"browser dump: {dump or 'none'}",
                 user_message=(
                     f"The published material {material!r} could not be found in "
                     "iSpring Cloud to read its share link."
@@ -1564,17 +1894,20 @@ def fetch_embed(
             )
 
         if not open_share(page, material):
+            dump = dump_page(page, "no-share-menu")
             raise ISpringPublishingError(
                 f"no Share item in the row menu; on screen: "
-                f"{visible_menu_labels(page)[:20]}",
+                f"{visible_menu_labels(page)[:20]}; browser dump: {dump or 'none'}",
                 user_message=USER_LINK_FAILED,
             )
         page.wait_for_timeout(2000)
 
         if not make_viewable_via_link(page):
+            dump = dump_page(page, "toggle-not-switched-on")
             raise ISpringPublishingError(
                 "'Make viewable via link' could not be switched on; the embed "
-                "code would point at content nobody can open",
+                f"code would point at content nobody can open; browser dump: "
+                f"{dump or 'none'}",
                 user_message=USER_LINK_FAILED,
             )
         page.wait_for_timeout(2000)
@@ -1588,10 +1921,13 @@ def fetch_embed(
             page.wait_for_timeout(1500)
             embed = read_embed_code(page)
 
+        dump = "" if embed else dump_page(page, "no-embed-code")
+        if dump_always():
+            dump_page(page, "share-popup")
         close_popup(page)
         if not embed:
             raise ISpringPublishingError(
-                "the share popup showed no iframe code",
+                f"the share popup showed no iframe code; browser dump: {dump or 'none'}",
                 user_message=USER_LINK_FAILED,
             )
         return embed
