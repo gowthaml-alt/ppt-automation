@@ -1249,6 +1249,139 @@ def open_result(page, name: str) -> bool:
     return False
 
 
+COVER_RE = re.compile(r"edit cover image", re.I)
+COVER_DIALOG_RE = re.compile(r"cover image settings", re.I)
+SAVE_RE = re.compile(r"^\s*save\s*$", re.I)
+TITLE_LABEL_RE = re.compile(r"^\s*title\s*$", re.I)
+
+
+def visible_menu_labels(page) -> list[str]:
+    """What is on screen right now, for when an expected item is missing."""
+    labels = []
+    for frame in _frames(page):
+        for role in ("menuitem", "option", "button", "link"):
+            try:
+                locator = frame.get_by_role(role)
+                count = locator.count()
+            except Exception:  # noqa: BLE001
+                continue
+            for index in range(min(count, 40)):
+                item = locator.nth(index)
+                try:
+                    if not item.is_visible():
+                        continue
+                    label = (item.inner_text() or "").strip()
+                except Exception:  # noqa: BLE001
+                    continue
+                if label and label not in labels:
+                    labels.append(label)
+    return labels
+
+
+def popup_with_text(page, pattern):
+    """The popup that contains this text, when several are stacked."""
+    for frame in _frames(page):
+        for selector in POPUP_SELECTORS:
+            try:
+                locator = frame.locator(selector)
+                count = locator.count()
+            except Exception:  # noqa: BLE001
+                continue
+            for index in range(min(count, 6)):
+                item = locator.nth(index)
+                try:
+                    if not item.is_visible():
+                        continue
+                    if visible_or_none(item.get_by_text(pattern)) is not None:
+                        return item
+                except Exception:  # noqa: BLE001
+                    continue
+    return None
+
+
+def open_share(page, material: str) -> bool:
+    """Open the row's three-dot menu and click Share.
+
+    The menu is drawn a moment after the click, and the first click sometimes
+    only selects the row, so this looks a few times and falls back to the
+    right-click menu before giving up.
+    """
+    if not open_row_menu(page, material):
+        return False
+    for attempt in range(1, 5):
+        page.wait_for_timeout(1200)
+        if click_by_role(page, SHARE_RE, what="Share"):
+            return True
+        _warn(
+            "no Share in the menu yet",
+            attempt=attempt,
+            items=visible_menu_labels(page)[:20],
+        )
+        if attempt == 2:
+            row = scroll_hunt(page, material, tries=1)
+            if row is not None:
+                try:
+                    row.click(button="right", timeout=4000)
+                    _note("tried the right-click menu")
+                    continue
+                except Exception:  # noqa: BLE001
+                    pass
+            open_row_menu(page, material)
+    return False
+
+
+def set_cover_title(page, title: str) -> bool:
+    """Rename the cover image title to the material name.
+
+    iSpring names the cover after the file it published, which is the working
+    copy — "source" or "source.repaired" — so it has to be corrected here.
+    """
+    if not click_by_role(page, COVER_RE, roles=("button", "link"), what="Edit cover image"):
+        _warn("no Edit cover image button; leaving the cover title alone")
+        return False
+    page.wait_for_timeout(2000)
+
+    dialog = popup_with_text(page, COVER_DIALOG_RE)
+    if dialog is None:
+        _warn("the cover image dialog did not open")
+        return False
+
+    box = None
+    for selector in ("input[type=text]", "input:not([type])", "textarea"):
+        try:
+            box = visible_or_none(dialog.locator(selector))
+        except Exception:  # noqa: BLE001
+            box = None
+        if box is not None:
+            break
+    if box is None:
+        _warn("no title box in the cover image dialog")
+        return False
+
+    try:
+        box.click(timeout=4000)
+        box.fill("")
+        box.type(title, delay=25)
+        page.wait_for_timeout(800)
+    except Exception as exc:  # noqa: BLE001
+        _warn("could not type the cover title", error=str(exc))
+        return False
+
+    saved = False
+    for locator in (dialog.get_by_role("button", name=SAVE_RE), dialog.get_by_text(SAVE_RE)):
+        found = visible_or_none(locator)
+        if found is not None and safe_click(found, "Save (cover title)"):
+            saved = True
+            break
+    if not saved:
+        _warn("could not press Save in the cover image dialog")
+        return False
+
+    page.wait_for_timeout(2000)
+    _note("set the cover title", title=title)
+    return True
+
+
 def fetch_embed(
     material: str,
     institution: str,
@@ -1342,16 +1475,11 @@ def fetch_embed(
                 ),
             )
 
-        if not open_row_menu(page, material):
+        if not open_share(page, material):
             raise ISpringPublishingError(
-                f"could not open the three-dot menu for {material!r}",
+                f"no Share item in the row menu; on screen: "
+                f"{visible_menu_labels(page)[:20]}",
                 user_message=USER_LINK_FAILED,
-            )
-        page.wait_for_timeout(1200)
-
-        if not click_by_role(page, SHARE_RE, what="Share"):
-            raise ISpringPublishingError(
-                "no Share item in the row menu", user_message=USER_LINK_FAILED
             )
         page.wait_for_timeout(2000)
 
@@ -1362,6 +1490,9 @@ def fetch_embed(
                 user_message=USER_LINK_FAILED,
             )
         page.wait_for_timeout(2000)
+
+        # The cover is titled after the working copy, not the material.
+        set_cover_title(page, material)
 
         embed = read_embed_code(page)
         if not embed:
