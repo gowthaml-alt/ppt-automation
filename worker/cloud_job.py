@@ -173,6 +173,28 @@ def open_with_repair(pptx: Path, settings: Settings):
     return service, Path(in_use)
 
 
+def remove_workspace(workspace: Path, attempts: int = 5) -> bool:
+    """Delete the downloaded and repaired files.
+
+    Windows keeps the file locked for a moment after PowerPoint quits, so the
+    first delete can fail even though nothing is really using the file.
+    """
+    for attempt in range(1, attempts + 1):
+        shutil.rmtree(workspace, ignore_errors=True)
+        if not workspace.exists():
+            logger.info(
+                "job files deleted",
+                extra={"stage": "cleanup", "folder": workspace.name},
+            )
+            return True
+        time.sleep(1)
+    logger.warning(
+        "could not delete the job files; something still has them open",
+        extra={"stage": "cleanup", "folder": str(workspace)},
+    )
+    return False
+
+
 def run_cloud_job(
     *,
     url: str = "",
@@ -194,6 +216,7 @@ def run_cloud_job(
     workspace.mkdir(parents=True, exist_ok=True)
 
     service = None
+    published = False
     try:
         if url:
             source_name = filename_from_url(url)
@@ -218,14 +241,27 @@ def run_cloud_job(
             close_powerpoint_after=False,
             skip_open=True,
         )
+        published = True
     finally:
+        # PowerPoint has to let go of the file before it can be deleted.
         if service is not None:
             try:
                 service.quit()
             except Exception:  # noqa: BLE001
                 logger.warning("PowerPoint teardown failed", exc_info=True)
-        if not keep_files:
-            shutil.rmtree(workspace, ignore_errors=True)
+        if keep_files:
+            logger.info(
+                "keeping the job files (--keep-files)",
+                extra={"stage": "cleanup", "folder": str(workspace)},
+            )
+        elif published or not settings.keep_failed_job_files:
+            remove_workspace(workspace)
+        else:
+            # A failed job's files are worth keeping: they are the evidence.
+            logger.info(
+                "keeping the files of a failed job (KEEP_FAILED_JOB_FILES)",
+                extra={"stage": "cleanup", "folder": str(workspace)},
+            )
 
     return CloudJobResult(
         iframe_url=result.iframe_url,

@@ -92,3 +92,20 @@ def test_download_rejects_a_disallowed_host(tmp_path):
     settings = _settings(tmp_path, download_allowed_hosts=["only.example.com"])
     with pytest.raises(DownloadError):
         download(SIGNED_URL, tmp_path, settings)
+
+
+def test_workspace_is_deleted(tmp_path):
+    from worker.cloud_job import remove_workspace
+
+    workspace = tmp_path / "cloud-123"
+    (workspace / "nested").mkdir(parents=True)
+    (workspace / "source.pptx").write_bytes(b"PK\x03\x04")
+    (workspace / "source.repaired.pptx").write_bytes(b"PK\x03\x04")
+    assert remove_workspace(workspace) is True
+    assert not workspace.exists()
+
+
+def test_removing_a_missing_workspace_is_fine(tmp_path):
+    from worker.cloud_job import remove_workspace
+
+    assert remove_workspace(tmp_path / "never-existed") is True
