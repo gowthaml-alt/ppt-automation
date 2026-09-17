@@ -92,7 +92,7 @@ OFF_RE = re.compile(r"^\s*off\s*$", re.I)
 
 # After PowerPoint says publishing is complete, iSpring keeps uploading to
 # the cloud for a few seconds. ISPRING_UPLOAD_WAIT overrides this.
-UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "15"))
+UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "20"))
 
 USER_PUBLISH_FAILED = "The presentation could not be published to iSpring Cloud."
 USER_LINK_FAILED = "The presentation was published but no share link could be read."
@@ -1729,48 +1729,80 @@ def open_recent(page) -> bool:
     return True
 
 
+def go_library(page, cloud_url: str = "") -> bool:
+    """Load the library from scratch, so nothing on screen is stale."""
+    target = cloud_url or f"{site_root(page)}/"
+    try:
+        page.goto(target, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(3500)
+        _note("loaded the library", url=target)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _warn("could not load the library; reloading", url=target, error=str(exc))
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(3000)
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+
+
 def locate_material(
     page, material: str, institution: str, cloud_url: str = "", rounds: int = 3
 ) -> bool:
-    """Find the just-published material's row, however it can be found.
+    """Find the just-published material's row.
 
-    iSpring Cloud needs a moment after a publish before the material shows up
-    in the library, and a tab that has been open since before the publish
-    never shows it at all. So every round starts by loading the page again,
-    and a round that finds nothing waits and tries once more.
+    The way that works, in this order:
 
-    Within a round: Recent first (the newest is at the top), then search by
-    name, then the folder a search returns, then walking the library.
+    1. search for the **institution**, open the folder the search returns,
+       and scroll down it until the material appears;
+    2. search for the material by name;
+    3. Recent, where the newest sits at the top;
+    4. walk the library by hand.
+
+    Every round starts by loading the page again. A tab that has been open
+    since before the publish shows an old list, and iSpring Cloud takes a
+    little while to list a material anyway — so a round that finds nothing
+    waits and looks again rather than failing.
     """
     for round_no in range(1, max(1, rounds) + 1):
-        if go_recent(page, cloud_url) and scroll_hunt(page, material, tries=3) is not None:
-            _note("found it in Recent", material=material, round=round_no)
-            return True
+        go_library(page, cloud_url)
 
-        if search_library(page, material):
-            if scroll_hunt(page, material, tries=3) is not None:
-                _note("found it by name", material=material)
-                return True
-            # The search listed the folder that holds it, not the material.
-            if institution and open_result(page, institution):
-                if scroll_hunt(page, material, tries=8) is not None:
-                    _note("found it inside the folder the search returned")
-                    return True
-
+        # 1. The folder, then scroll inside it. This is the reliable route:
+        # the search returns the institution's folder, not what is in it.
         if institution and search_library(page, institution):
             if open_result(page, institution):
-                if scroll_hunt(page, material, tries=8) is not None:
-                    _note("found it in the institution folder", folder=institution)
+                if scroll_hunt(page, material, tries=15) is not None:
+                    _note(
+                        "found it in the institution folder",
+                        folder=institution,
+                        round=round_no,
+                    )
                     return True
+                _warn("opened the folder but the material is not in it yet",
+                      folder=institution, round=round_no)
 
+        # 2. Some materials come back from a search on their own name.
+        if search_library(page, material):
+            if scroll_hunt(page, material, tries=4) is not None:
+                _note("found it by name", material=material)
+                return True
+
+        # 3. Recent: the newest is at the top.
+        if go_recent(page, cloud_url) and scroll_hunt(page, material, tries=3) is not None:
+            _note("found it in Recent", material=material)
+            return True
+
+        # 4. No search at all: open the folder from the list and scroll.
         if institution:
-            _note("walking the library", folder=institution)
-            if enter_folder(page, institution) and scroll_hunt(page, material, tries=10) is not None:
+            go_library(page, cloud_url)
+            if enter_folder(page, institution) and scroll_hunt(page, material, tries=15) is not None:
+                _note("found it by walking the library", folder=institution)
                 return True
 
         if round_no < rounds:
             _warn(
-                "not in the library yet; waiting and looking again",
+                "not listed yet; waiting, then loading the library again",
                 material=material,
                 round=round_no,
             )
