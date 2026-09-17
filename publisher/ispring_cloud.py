@@ -86,12 +86,14 @@ class CloudPublishResult:
     elapsed_s: float
 
 
-def _note(message: str, **fields) -> None:
-    logger.info(message, extra={"stage": STAGE, **fields})
+def _note(event: str, **fields) -> None:
+    # The parameter is named 'event', not 'message': a caller logging a field
+    # called message would otherwise collide with it and raise TypeError.
+    logger.info(event, extra={"stage": STAGE, **fields})
 
 
-def _warn(message: str, **fields) -> None:
-    logger.warning(message, extra={"stage": STAGE, **fields})
+def _warn(event: str, **fields) -> None:
+    logger.warning(event, extra={"stage": STAGE, **fields})
 
 
 def ensure_com() -> None:
@@ -644,7 +646,7 @@ def wait_for_completion(window, timeout_s: float) -> None:
     while time.monotonic() < deadline:
         finished = done()
         if finished is not None:
-            _note("publishing complete", message=normalise(finished.window_text()))
+            _note("publishing complete", text=normalise(finished.window_text()))
             for control in by_auto_id(window, ID_DONE_DETAIL):
                 detail = normalise(control.window_text())
                 if detail:
