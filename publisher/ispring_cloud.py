@@ -67,6 +67,16 @@ POPUP_SELECTORS = (
     '[class*="modal"]',
 )
 IFRAME_RE = re.compile(r"<iframe\b[^>]*>(?:.*?</iframe>)?", re.I | re.S)
+# The share popup shows the embed code as coloured text, not in a text box, and
+# clips it with an ellipsis. So the URL is taken directly, and the iframe is
+# rebuilt from it. The preview link carries the same id as the embed player.
+EMBED_URL_RE = re.compile(r"https?://[^\s\"'<>]+/app/embed-player/[A-Za-z0-9\-]+", re.I)
+PREVIEW_URL_RE = re.compile(r"(https?://[^\s\"'<>]+)/app/preview/([A-Za-z0-9\-]+)", re.I)
+EMBED_TEMPLATE = (
+    '<iframe src="{url}" width="560" height="315" frameborder="0" '
+    'scrolling="auto" allowtransparency="true" allowfullscreen="1" '
+    'style="border: none;"></iframe>'
+)
 SRC_RE = re.compile(r"""\bsrc\s*=\s*["']([^"']+)["']""", re.I)
 MENU_BUTTON_RE = re.compile(r"more|menu|action|option|\.\.\.|…", re.I)
 SHARE_RE = re.compile(r"^\s*share\b", re.I)
@@ -1069,8 +1079,15 @@ def _js_click(locator) -> bool:
 
 
 def read_embed_code(page) -> str:
-    """Pull the iframe snippet out of the share popup."""
+    """Get the embed iframe out of the share popup.
+
+    Four ways, in order of how much they can be trusted:
+    the text box if there is one; the popup's text content (which holds the
+    whole URL even though the display clips it); the preview link, which
+    carries the same id as the embed player; and finally the Copy button.
+    """
     root = scope(page)
+
     for selector in ("textarea", "input[type=text]", "input:not([type])"):
         try:
             locator = root.locator(selector)
@@ -1084,36 +1101,107 @@ def read_embed_code(page) -> str:
                 continue
             if value and "<iframe" in value.lower():
                 return value.strip()
+
+    # textContent, not inner_text: the displayed text is cut off with an
+    # ellipsis by the styling, but the DOM still holds all of it.
+    texts = []
+    try:
+        texts.append(root.evaluate("el => el.textContent || ''"))
+    except Exception:  # noqa: BLE001
+        pass
     for frame in _frames(page):
-        for getter in (lambda f=frame: f.inner_text("body"), lambda f=frame: f.content()):
+        for getter in (
+            lambda f=frame: f.evaluate("() => document.body.textContent || ''"),
+            lambda f=frame: f.content(),
+        ):
             try:
-                blob = getter()
+                texts.append(getter())
             except Exception:  # noqa: BLE001
                 continue
-            match = IFRAME_RE.search(blob or "")
-            if match and "ispring" in match.group(0).lower():
-                return match.group(0).strip()
+
+    import html as _html
+
+    for blob in texts:
+        if not blob:
+            continue
+        blob = _html.unescape(blob)
+        match = IFRAME_RE.search(blob)
+        if match and "ispring" in match.group(0).lower() and match.group(0).endswith(">"):
+            return match.group(0).strip()
+        url = EMBED_URL_RE.search(blob)
+        if url:
+            _note("built the iframe from the embed URL")
+            return EMBED_TEMPLATE.format(url=url.group(0))
+
+    # The preview link and the embed player share an id.
+    for selector in ("input[type=text]", "input:not([type])"):
+        try:
+            locator = root.locator(selector)
+            count = locator.count()
+        except Exception:  # noqa: BLE001
+            count = 0
+        for index in range(min(count, 12)):
+            try:
+                value = locator.nth(index).input_value(timeout=2000) or ""
+            except Exception:  # noqa: BLE001
+                continue
+            preview = PREVIEW_URL_RE.search(value)
+            if preview:
+                url = f"{preview.group(1)}/app/embed-player/{preview.group(2)}"
+                _note("built the iframe from the preview link", url=url)
+                return EMBED_TEMPLATE.format(url=url)
+    for blob in texts:
+        preview = PREVIEW_URL_RE.search(_html.unescape(blob or ""))
+        if preview:
+            url = f"{preview.group(1)}/app/embed-player/{preview.group(2)}"
+            _note("built the iframe from the preview link", url=url)
+            return EMBED_TEMPLATE.format(url=url)
     return ""
 
 
 def close_popup(page) -> None:
-    """Close the share popup so the browser is clean for the next job."""
+    """Close the share popup so the browser is clean for the next job.
+
+    The X has no text, so it is found by its aria-label or as the only small
+    button at the top of the popup. Escape alone is not always enough.
+    """
+    for attempt in range(3):
+        if popup_root(page) is None:
+            _note("share popup closed")
+            return
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(900)
+        except Exception:  # noqa: BLE001
+            pass
+        if popup_root(page) is None:
+            _note("share popup closed")
+            return
+
+        root = scope(page)
+        for getter in (
+            lambda: root.get_by_role("button", name=re.compile(r"close|dismiss", re.I)),
+            lambda: root.locator("[aria-label*='lose' i]"),
+            lambda: root.locator("button"),
+        ):
+            try:
+                found = visible_or_none(getter())
+            except Exception:  # noqa: BLE001
+                found = None
+            if found is not None and safe_click(found, "popup close"):
+                page.wait_for_timeout(900)
+                break
+        if popup_root(page) is None:
+            _note("share popup closed")
+            return
+        _warn("share popup still open", attempt=attempt + 1)
+
+    # Last resort: reload the library, which drops any popup with it.
     try:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(800)
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        _note("reloaded the page to clear the popup")
     except Exception:  # noqa: BLE001
-        pass
-    if popup_root(page) is None:
-        _note("share popup closed")
-        return
-    for pattern in (re.compile(r"^\s*close\s*$", re.I), re.compile(r"^\s*(done|ok)\s*$", re.I)):
-        if click_by_role(page, pattern, what="popup close"):
-            page.wait_for_timeout(800)
-            break
-    if popup_root(page) is not None:
         _warn("share popup did not close")
-    else:
-        _note("share popup closed")
 
 
 CHROME_PATHS = (
