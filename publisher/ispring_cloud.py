@@ -469,17 +469,23 @@ def warn_if_free_edition(name: str) -> None:
         )
 
 
-def has_addin_tab(window, timeout_s: float = 20) -> bool:
-    """Is an iSpring tab on the ribbon? Waits a little, never raises.
+def has_addin_tab(window, timeout_s: float = 20, require_suite: bool = True) -> bool:
+    """Is the Suite tab on the ribbon? Waits a little, never raises.
 
-    Used before a publish to decide whether the add-in has to be put back.
+    A ribbon showing only "iSpring Free 11" counts as *not ready*: both
+    add-ins are registered on this machine, and when Office disables the
+    Suite one the Free one is left behind. That looks like iSpring is
+    loaded while the Suite publish options are gone. Treating it as missing
+    is what makes the automatic repair run.
     """
     deadline = time.monotonic() + timeout_s
     while True:
         tab, name = find_ispring_tab(window)
         if tab is not None:
+            if not require_suite or not FREE_TAB_RE.search(name):
+                _note("iSpring ribbon tab present", tab=name)
+                return True
             warn_if_free_edition(name)
-            return True
         if time.monotonic() >= deadline:
             return False
         dismiss_nuisance_dialogs(window)
