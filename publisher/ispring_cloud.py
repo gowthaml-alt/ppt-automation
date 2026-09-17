@@ -25,6 +25,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from utils.exceptions import ISpringPublishingError
 
@@ -1141,6 +1142,20 @@ def scroll_hunt(page, name: str, tries: int = 40):
     only reachable by scrolling and looking again.
     """
     pattern = re.compile(re.escape(name), re.I)
+    # Start from the top of the list. A previous hunt may have left the page
+    # scrolled half way down, and the newest material sits at the top — which
+    # is how a row that is plainly on screen gets scrolled straight past.
+    try:
+        page.evaluate("() => window.scrollTo(0, 0)")
+        for selector in ("[role=grid]", "[role=table]", "main", "[class*=scroll]"):
+            page.evaluate(
+                "sel => document.querySelectorAll(sel)"
+                ".forEach(el => { if (el.scrollTop) el.scrollTop = 0; })",
+                selector,
+            )
+        page.wait_for_timeout(400)
+    except Exception:  # noqa: BLE001
+        pass
     for attempt in range(tries):
         for frame in _frames(page):
             found = visible_or_none(frame.get_by_text(pattern))
@@ -1159,6 +1174,38 @@ def scroll_hunt(page, name: str, tries: int = 40):
             break
         page.wait_for_timeout(400)
     return None
+
+
+def visible_row_labels(page, limit: int = 25) -> list[str]:
+    """The names of the rows on screen right now.
+
+    Printed into the log when the material cannot be found: nine times out
+    of ten it shows the name is spelled differently from what was asked for.
+    """
+    script = """
+    () => {
+      const out = [];
+      const seen = new Set();
+      const rows = document.querySelectorAll(
+        '[role=row], [role=gridcell], [role=listitem], tr, a[href*="/app/"]');
+      for (const row of rows) {
+        const text = (row.textContent || '').replace(/\\s+/g, ' ').trim();
+        if (!text || text.length > 120 || seen.has(text)) continue;
+        const r = row.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) continue;
+        seen.add(text);
+        out.push(text);
+      }
+      return out;
+    }
+    """
+    labels: list[str] = []
+    for frame in _frames(page):
+        try:
+            labels.extend(frame.evaluate(script))
+        except Exception:  # noqa: BLE001
+            continue
+    return labels[:limit]
 
 
 def enter_folder(page, folder: str) -> bool:
@@ -1627,27 +1674,48 @@ def search_library(page, term: str) -> bool:
     Far better than scrolling: the list can be hundreds of rows long, and the
     row we want is the one just published, which may be anywhere in it.
     """
-    root = popup_root(page)
-    if root is not None:
-        return False  # a popup is covering the library
+    # A popup over the library swallows the click. Close it and carry on:
+    # giving up here is what made the search never run at all.
+    if popup_root(page) is not None:
+        _warn("a popup is covering the library; closing it before searching")
+        close_popup(page)
+
+    tried: list[str] = []
     for frame in _frames(page):
         for selector in SEARCH_BOX_SELECTORS:
             try:
                 box = visible_or_none(frame.locator(selector))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                tried.append(f"{selector}: {exc.__class__.__name__}")
                 continue
             if box is None:
+                tried.append(f"{selector}: none visible")
                 continue
             try:
                 box.click(timeout=3000)
                 box.fill("")
                 box.type(term, delay=30)
                 box.press("Enter")
-                page.wait_for_timeout(2500)
+                page.wait_for_timeout(3000)
                 _note("searched the library", term=term, selector=selector)
                 return True
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                tried.append(f"{selector}: {exc.__class__.__name__}")
                 continue
+
+    # Nothing to type into. Ask the site for the results page directly —
+    # it is the same search, just without the box.
+    for path in ("/app/s?q={term}", "/app/search?q={term}"):
+        target = f"{site_root(page)}{path.format(term=quote(term))}"
+        try:
+            page.goto(target, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(3000)
+            _note("searched by URL", term=term, url=target)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            tried.append(f"{target}: {exc.__class__.__name__}")
+
+    _warn("no search box on the page", term=term, attempts=tried[:10])
     return False
 
 
@@ -1800,12 +1868,13 @@ def locate_material(
                 _note("found it by walking the library", folder=institution)
                 return True
 
+        _warn(
+            "not listed yet",
+            material=material,
+            round=round_no,
+            on_screen=visible_row_labels(page, limit=15),
+        )
         if round_no < rounds:
-            _warn(
-                "not listed yet; waiting, then loading the library again",
-                material=material,
-                round=round_no,
-            )
             page.wait_for_timeout(10000)
     return False
 
