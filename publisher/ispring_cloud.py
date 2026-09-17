@@ -1130,7 +1130,11 @@ def fetch_embed(material: str, institution: str, cdp_url: str) -> str:
         except Exception as exc:  # noqa: BLE001
             raise ISpringPublishingError(
                 f"could not attach to Chrome at {cdp_url}: {exc}",
-                user_message=USER_LINK_FAILED,
+                user_message=(
+                    "The browser the share step uses is not running. Start it "
+                    "with scripts\\start_ispring_chrome.cmd, sign in to iSpring "
+                    "Cloud once, and leave it open."
+                ),
             ) from exc
         if not browser.contexts:
             raise ISpringPublishingError(
@@ -1142,7 +1146,11 @@ def fetch_embed(material: str, institution: str, cdp_url: str) -> str:
         if not pages:
             raise ISpringPublishingError(
                 "no iSpring tab is open in that Chrome",
-                user_message=USER_LINK_FAILED,
+                user_message=(
+                    "Manage Content did not open iSpring Cloud in the browser "
+                    "the share step watches. Make sure the Chrome started by "
+                    "scripts\\start_ispring_chrome.cmd is the only one running."
+                ),
             )
         page = pages[-1]
         page.bring_to_front()
