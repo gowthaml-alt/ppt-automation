@@ -208,6 +208,46 @@ def ensure_usable_powerpoint(terminate) -> None:
     terminate()
 
 
+def addin_ready(service) -> bool:
+    """Is the iSpring tab on the ribbon of the PowerPoint we just opened?
+
+    Checked before every publish, because Office quietly disables the add-in
+    after any hard close and the tab is the only proof it actually loaded.
+    A missing tab is fixed in two steps: switch it on inside the running
+    PowerPoint, and if that does not work, put the registry right and
+    restart PowerPoint.
+    """
+    from powerpoint.addin import connect_addin
+    from publisher.ispring_cloud import find_powerpoint_window, has_addin_tab
+
+    try:
+        window = find_powerpoint_window()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "could not find the PowerPoint window to check the add-in",
+            extra={"stage": "powerpoint_open", "detail": str(exc)},
+        )
+        return False
+
+    if has_addin_tab(window):
+        logger.info(
+            "iSpring tab is on the ribbon", extra={"stage": "powerpoint_open"}
+        )
+        return True
+
+    logger.warning(
+        "the iSpring tab is missing; switching the add-in on",
+        extra={"stage": "powerpoint_open"},
+    )
+    if connect_addin(getattr(service, "app", None)) and has_addin_tab(window, timeout_s=30):
+        logger.info(
+            "iSpring tab came back without restarting PowerPoint",
+            extra={"stage": "powerpoint_open"},
+        )
+        return True
+    return False
+
+
 def open_with_repair(pptx: Path, settings: Settings):
     """Open the deck through PowerPoint, repairing it if need be.
 
@@ -239,7 +279,7 @@ def open_with_repair(pptx: Path, settings: Settings):
         )
 
     last_error: Exception | None = None
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
         service = PowerPointService(settings)
         try:
             service.start()
@@ -252,7 +292,7 @@ def open_with_repair(pptx: Path, settings: Settings):
             except Exception:  # noqa: BLE001
                 pass
             terminate_powerpoint_processes()
-            if attempt == 1:
+            if attempt < 3:
                 logger.warning(
                     "PowerPoint would not open the deck; retrying with a fresh copy",
                     extra={"stage": "powerpoint_open", "detail": str(exc)},
@@ -265,8 +305,27 @@ def open_with_repair(pptx: Path, settings: Settings):
                 "PowerPoint repaired the deck",
                 extra={"stage": "powerpoint_open", "prompts_answered": watcher.answered},
             )
-        in_use = service.current_pptx or pptx
-        return service, Path(in_use), watcher.answered
+
+        # The deck is open. Nothing can be published without the iSpring tab,
+        # so check it now and put the add-in back before going further.
+        if addin_ready(service) or attempt == 3:
+            in_use = service.current_pptx or pptx
+            return service, Path(in_use), watcher.answered
+
+        logger.warning(
+            "restarting PowerPoint to load the iSpring add-in",
+            extra={"stage": "powerpoint_open", "attempt": attempt},
+        )
+        try:
+            service.quit()
+        except Exception:  # noqa: BLE001
+            pass
+        terminate_powerpoint_processes()
+        time.sleep(3)
+        # With PowerPoint closed the registry can be corrected; while it runs,
+        # Office simply writes these keys back on exit.
+        ensure_addin_enabled()
+        time.sleep(2)
 
     raise last_error  # unreachable; the loop either returns or raises
 

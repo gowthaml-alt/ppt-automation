@@ -73,6 +73,15 @@ class PowerPointService:
         """
         return self._current_pptx
 
+    @property
+    def app(self):
+        """The PowerPoint COM application, or None before start().
+
+        Exposed so the add-in check can switch the iSpring add-in back on
+        through PowerPoint itself, without restarting it.
+        """
+        return self._app
+
     def is_available(self) -> tuple[bool, str]:
         if sys.platform != "win32":
             return False, "PowerPoint COM is only available on Windows"
@@ -369,6 +378,10 @@ class NoOpPowerPointService:
     @property
     def current_pptx(self) -> Path | None:
         return self._current_pptx
+
+    @property
+    def app(self):
+        return None
 
     def is_available(self) -> tuple[bool, str]:
         return True, "noop"

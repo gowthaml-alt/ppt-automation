@@ -431,6 +431,29 @@ def ribbon_tabs(window) -> list[str]:
     return names
 
 
+def has_addin_tab(window, timeout_s: float = 20) -> bool:
+    """Is the iSpring tab on the ribbon? Waits a little, never raises.
+
+    Any tab whose name mentions iSpring counts, so a Suite version change
+    does not read as a missing add-in. Used before a publish to decide
+    whether the add-in has to be put back.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            tab = window.child_window(title=RIBBON_TAB, control_type="TabItem")
+            if tab.exists():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        if any("ispring" in name.lower() for name in ribbon_tabs(window)):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        dismiss_nuisance_dialogs(window)
+        time.sleep(2)
+
+
 def wait_for_addin(window, timeout_s: float = 90):
     """Wait for the iSpring tab to appear on the ribbon.
 

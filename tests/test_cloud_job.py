@@ -141,3 +141,51 @@ def test_addin_state_is_unhealthy_when_office_demoted_it():
 
     missing = AddinState()
     assert missing.healthy is False
+
+
+class _FakeWindow:
+    pass
+
+
+def _patch_addin_check(monkeypatch, *, tab_states, connected):
+    """tab_states is consumed one per has_addin_tab call."""
+    import powerpoint.addin as addin_mod
+    import publisher.ispring_cloud as cloud_mod
+
+    calls = {"connect": 0}
+    states = list(tab_states)
+
+    monkeypatch.setattr(cloud_mod, "find_powerpoint_window", lambda: _FakeWindow())
+    monkeypatch.setattr(
+        cloud_mod, "has_addin_tab", lambda window, timeout_s=20: states.pop(0)
+    )
+
+    def _connect(app):
+        calls["connect"] += 1
+        return connected
+
+    monkeypatch.setattr(addin_mod, "connect_addin", _connect)
+    return calls
+
+
+def test_addin_ready_when_the_tab_is_there(monkeypatch):
+    from worker.cloud_job import addin_ready
+
+    calls = _patch_addin_check(monkeypatch, tab_states=[True], connected=False)
+    assert addin_ready(object()) is True
+    assert calls["connect"] == 0  # nothing to fix, so nothing is touched
+
+
+def test_missing_tab_is_switched_on_without_restarting(monkeypatch):
+    from worker.cloud_job import addin_ready
+
+    calls = _patch_addin_check(monkeypatch, tab_states=[False, True], connected=True)
+    assert addin_ready(object()) is True
+    assert calls["connect"] == 1
+
+
+def test_missing_tab_that_cannot_be_switched_on_asks_for_a_restart(monkeypatch):
+    from worker.cloud_job import addin_ready
+
+    _patch_addin_check(monkeypatch, tab_states=[False, False], connected=True)
+    assert addin_ready(object()) is False

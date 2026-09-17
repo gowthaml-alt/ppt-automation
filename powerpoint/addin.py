@@ -243,6 +243,64 @@ def ensure_addin_enabled() -> bool:
     return False
 
 
+def connect_addin(app) -> bool:
+    """Switch the iSpring add-in on inside a PowerPoint that is already running.
+
+    PowerPoint keeps its loaded add-ins in the COMAddIns collection, and
+    setting Connect to True loads one there and then. This is worth trying
+    before restarting PowerPoint: it takes a second and usually brings the
+    ribbon tab back on its own.
+
+    Returns True when an iSpring add-in is connected afterwards.
+    """
+    if app is None:
+        return False
+    try:
+        addins = app.COMAddIns
+        count = int(addins.Count)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "could not read PowerPoint's add-in list",
+            extra={"stage": STAGE, "error": str(exc)},
+        )
+        return False
+
+    connected = False
+    for index in range(1, count + 1):
+        try:
+            item = addins.Item(index)
+            prog_id = str(getattr(item, "ProgID", "") or "")
+        except Exception:  # noqa: BLE001
+            continue
+        if ADDIN_HINT not in prog_id.lower():
+            continue
+        try:
+            if bool(getattr(item, "Connect", False)):
+                logger.info(
+                    "iSpring add-in already connected",
+                    extra={"stage": STAGE, "prog_id": prog_id},
+                )
+                connected = True
+                continue
+            item.Connect = True
+            connected = bool(getattr(item, "Connect", False)) or connected
+            logger.info(
+                "switched the iSpring add-in on in the running PowerPoint",
+                extra={"stage": STAGE, "prog_id": prog_id},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "could not connect the iSpring add-in through PowerPoint",
+                extra={"stage": STAGE, "prog_id": prog_id, "error": str(exc)},
+            )
+    if not connected:
+        logger.warning(
+            "no iSpring add-in in PowerPoint's add-in list",
+            extra={"stage": STAGE, "addins_seen": count},
+        )
+    return connected
+
+
 def _office_versions() -> list[str]:
     """Office version keys present for PowerPoint, newest first."""
     winreg = _winreg()
