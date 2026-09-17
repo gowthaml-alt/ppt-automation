@@ -114,6 +114,7 @@ class CloudPublisher:
             publish_timeout_s=self._settings.ispring_publish_timeout_seconds,
             browser_profile_dir=self._settings.ispring_chrome_profile_dir,
             browser_path=self._settings.ispring_chrome_path,
+            cloud_url=self._settings.ispring_cloud_url,
         )
 
     def publish(self, pptx: Path, output_dir: Path, timeout_s: int):

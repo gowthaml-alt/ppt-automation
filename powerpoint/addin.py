@@ -26,6 +26,13 @@ STAGE = "powerpoint_open"
 ADDIN_HINT = "ispring"
 LOAD_AT_STARTUP = 3
 
+# Office's own policy list. An add-in listed here as "1" is always enabled and
+# Office will not disable it after a crash — which is what stops the ribbon tab
+# coming and going. RestrictToList is deliberately never written: that one
+# blocks every add-in not in the list.
+POLICY_BASE = r"SOFTWARE\Policies\Microsoft\Office"
+POLICY_ALWAYS_ENABLED = "1"
+
 ADDIN_BASES = (
     r"SOFTWARE\Microsoft\Office\PowerPoint\Addins",
     r"SOFTWARE\WOW6432Node\Microsoft\Office\PowerPoint\Addins",
@@ -195,6 +202,8 @@ def ensure_addin_enabled() -> bool:
             extra={"stage": STAGE},
         )
         return False
+    harden_addin()  # cheap, idempotent, and stops the next crash disabling it
+
     if state.healthy:
         logger.info(
             "iSpring add-in is enabled",
@@ -232,3 +241,87 @@ def ensure_addin_enabled() -> bool:
         extra={"stage": STAGE, "demoted": after.demoted},
     )
     return False
+
+
+def _office_versions() -> list[str]:
+    """Office version keys present for PowerPoint, newest first."""
+    winreg = _winreg()
+    versions = []
+    try:
+        handle = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Office")
+    except OSError:
+        return ["16.0"]
+    index = 0
+    while True:
+        try:
+            name = winreg.EnumKey(handle, index)
+        except OSError:
+            break
+        index += 1
+        if not name[0].isdigit():
+            continue
+        try:
+            winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Microsoft\Office\{name}\PowerPoint"
+            ).Close()
+        except OSError:
+            continue
+        versions.append(name)
+    return sorted(versions, reverse=True) or ["16.0"]
+
+
+def addin_prog_ids() -> list[str]:
+    """The ProgIDs of the registered iSpring add-ins."""
+    return [path.rsplit("\\", 1)[-1] for _hive, path, _label in _addin_keys()]
+
+
+def harden_addin() -> bool:
+    """Tell Office never to disable the iSpring add-in.
+
+    Without this, every forced close of PowerPoint can make Office demote the
+    add-in, and the ribbon tab disappears until someone re-enables it by hand.
+    Listing the add-in in the policy AddinList as "1" makes that permanent:
+    Office keeps it enabled no matter what it thinks happened.
+    """
+    if sys.platform != "win32":
+        return False
+    winreg = _winreg()
+    prog_ids = addin_prog_ids()
+    if not prog_ids:
+        return False
+    wrote = False
+    for version in _office_versions():
+        path = rf"{POLICY_BASE}\{version}\PowerPoint\Resiliency\AddinList"
+        try:
+            handle = winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ
+            )
+        except OSError as exc:
+            logger.warning(
+                "could not open the add-in policy key",
+                extra={"stage": STAGE, "key": path, "error": str(exc)},
+            )
+            continue
+        with handle:
+            for prog_id in prog_ids:
+                try:
+                    existing, _kind = winreg.QueryValueEx(handle, prog_id)
+                except OSError:
+                    existing = None
+                if str(existing) == POLICY_ALWAYS_ENABLED:
+                    continue
+                try:
+                    winreg.SetValueEx(
+                        handle, prog_id, 0, winreg.REG_SZ, POLICY_ALWAYS_ENABLED
+                    )
+                    wrote = True
+                    logger.info(
+                        "add-in pinned to always enabled",
+                        extra={"stage": STAGE, "prog_id": prog_id, "office": version},
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "could not pin the add-in",
+                        extra={"stage": STAGE, "prog_id": prog_id, "error": str(exc)},
+                    )
+    return wrote

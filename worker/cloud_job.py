@@ -340,6 +340,7 @@ def run_cloud_job(
             skip_open=True,
             browser_profile_dir=settings.ispring_chrome_profile_dir,
             browser_path=settings.ispring_chrome_path,
+            cloud_url=settings.ispring_cloud_url,
         )
         published = True
     finally:

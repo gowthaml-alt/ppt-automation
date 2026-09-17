@@ -1170,7 +1170,6 @@ def start_browser(cdp_url: str, profile_dir: str, chrome_path: str = "") -> bool
                 f"--user-data-dir={profile_dir}",
                 "--no-first-run",
                 "--no-default-browser-check",
-                "https://harshit.ispring.com/",
             ],
             close_fds=True,
         )
@@ -1256,6 +1255,7 @@ def fetch_embed(
     cdp_url: str,
     profile_dir: str = r"C:\ispring-chrome-profile",
     chrome_path: str = "",
+    cloud_url: str = "https://harshit.ispring.com/",
 ) -> str:
     """Drive the Chrome that is already running and already signed in.
 
@@ -1286,19 +1286,29 @@ def fetch_embed(
                 user_message=USER_LINK_FAILED,
             )
         context = browser.contexts[0]
-        pages = [p for p in context.pages if "ispring" in (p.url or "").lower()]
-        if not pages:
-            raise ISpringPublishingError(
-                "no iSpring tab is open in that Chrome",
-                user_message=(
-                    "Manage Content did not open iSpring Cloud in the browser "
-                    "the share step watches. Make sure the Chrome started by "
-                    "scripts\\start_ispring_chrome.cmd is the only one running."
-                ),
-            )
-        page = pages[-1]
+
+        # Manage Content opens the machine's default browser, which is not
+        # necessarily this one, so an iSpring tab may never appear here. Give
+        # it a moment, then open the library directly rather than depend on it.
+        page = None
+        for _ in range(8):
+            pages = [p for p in context.pages if "ispring" in (p.url or "").lower()]
+            if pages:
+                page = pages[-1]
+                break
+            time.sleep(1)
+        if page is None:
+            _note("no iSpring tab yet; opening the library", url=cloud_url)
+            page = context.new_page() if not context.pages else context.pages[-1]
+            try:
+                page.goto(cloud_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as exc:  # noqa: BLE001
+                raise ISpringPublishingError(
+                    f"could not open {cloud_url}: {exc}",
+                    user_message=USER_LINK_FAILED,
+                ) from exc
         page.bring_to_front()
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(3000)
 
         if visible_or_none(page.get_by_text(re.compile(r"sign in|log in", re.I))) is not None:
             _warn("that Chrome may not be signed in to iSpring Cloud")
@@ -1385,6 +1395,8 @@ def publish_to_cloud(
     skip_open: bool = False,
     browser_profile_dir: str = r"C:\ispring-chrome-profile",
     browser_path: str = "",
+    cloud_url: str = "https://harshit.ispring.com/",
+    press_manage_content: bool = False,
 ) -> CloudPublishResult:
     """Publish one deck and return its embed URL.
 
@@ -1428,12 +1440,14 @@ def publish_to_cloud(
         activate(publish, "Publish")
         wait_for_completion(window, publish_timeout_s)
 
-        if not click_manage_content(window):
-            raise ISpringPublishingError(
-                "could not open the material in the browser",
-                user_message=USER_LINK_FAILED,
-            )
-        time.sleep(10)  # let the browser open and settle
+        # Manage Content is deliberately not pressed: it opens Windows' default
+        # browser, which is not the one the share step drives. It would steal
+        # focus from the automation and leave a stray window behind every job.
+        if press_manage_content:
+            click_manage_content(window)
+            time.sleep(10)
+        else:
+            close_ispring_windows(window)
 
         embed = fetch_embed(
             content_name or institution,
@@ -1441,6 +1455,7 @@ def publish_to_cloud(
             cdp_url,
             profile_dir=browser_profile_dir,
             chrome_path=browser_path,
+            cloud_url=cloud_url,
         )
     finally:
         if window is not None:

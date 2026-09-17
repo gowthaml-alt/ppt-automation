@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # default profile, so the everyday signed-in Chrome cannot be attached to.
     ispring_chrome_profile_dir: str = r"C:\ispring-chrome-profile"
     ispring_chrome_path: str = ""
+    # The iSpring Cloud library. The share step opens this itself: Manage
+    # Content opens the machine's default browser, which is not the one the
+    # automation attaches to.
+    ispring_cloud_url: str = "https://harshit.ispring.com/"
     storage_backend: Literal["local_fs", "s3", "http_api"] = "local_fs"
     browser_test_enabled: bool = True
 
