@@ -14,6 +14,11 @@ from utils.exceptions import ISpringNotConfiguredError
 
 
 def _settings(tmp_path: Path, **overrides) -> Settings:
+    """Settings for a test, ignoring any .env on the machine running it.
+
+    Without _env_file=None these tests read the developer's own .env, so a
+    machine with ISPRING_ADAPTER=fake would fail the default-value test.
+    """
     values = {
         "app_env": "development",
         "backend_base_url": "https://backend.example.com",
@@ -21,7 +26,7 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
         "log_root": str(tmp_path / "logs"),
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
 def test_default_adapter_is_not_configured(tmp_path):

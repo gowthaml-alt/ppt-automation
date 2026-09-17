@@ -24,7 +24,8 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
         "log_root": str(tmp_path / "logs"),
     }
     values.update(overrides)
-    return Settings(**values)
+    # Ignore any .env on the machine running the tests.
+    return Settings(_env_file=None, **values)
 
 
 def test_filename_ignores_the_signature_query():
