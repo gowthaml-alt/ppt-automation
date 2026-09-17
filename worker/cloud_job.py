@@ -148,6 +148,66 @@ def inspect(pptx: Path) -> bool:
     return False
 
 
+def powerpoint_is_running() -> bool:
+    try:
+        import psutil  # type: ignore
+    except ImportError:
+        return True  # cannot tell; assume it is
+    for process in psutil.process_iter(["name"]):
+        try:
+            if (process.info.get("name") or "").lower() == "powerpnt.exe":
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def powerpoint_answers_com() -> bool:
+    """Is the running PowerPoint still usable through COM?
+
+    A half-dead instance hands back an Application object whose Presentations
+    collection has no Open2007, and every later call fails oddly. That is the
+    thing worth checking before deciding to kill it.
+    """
+    try:
+        import win32com.client  # type: ignore
+
+        app = win32com.client.GetActiveObject("PowerPoint.Application")
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return getattr(getattr(app, "Presentations", None), "Open2007", None) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def ensure_usable_powerpoint(terminate) -> None:
+    """Only kill PowerPoint when it has actually stopped working.
+
+    Killing it is not free: Office treats a killed process as a crash and moves
+    whatever add-in was loaded into Disabled Items, which is how the iSpring
+    ribbon tab disappears. So a healthy instance is left alone.
+    """
+    from publisher.ispring_cloud import ensure_com
+
+    ensure_com()
+    if not powerpoint_is_running():
+        return
+    if powerpoint_answers_com():
+        logger.info(
+            "reusing the PowerPoint that is already running",
+            extra={"stage": "powerpoint_open"},
+        )
+        return
+    logger.warning(
+        "the running PowerPoint is not answering COM; closing it. "
+        "Office may disable the iSpring add-in after this — "
+        "scripts/fix_ispring_addin.py --fix puts it back",
+        extra={"stage": "powerpoint_open"},
+    )
+    terminate()
+
+
 def open_with_repair(pptx: Path, settings: Settings):
     """Open the deck through PowerPoint, repairing it if need be.
 
@@ -165,18 +225,7 @@ def open_with_repair(pptx: Path, settings: Settings):
 
     ensure_com()
 
-    # Start from a clean PowerPoint. A copy left running by an earlier job can
-    # be half dead — COM attaches to it, then Presentations.Open2007 is missing
-    # and every later call fails with a bare AttributeError.
-    #
-    # This closes ANY PowerPoint that is running, including one a person has
-    # open with unsaved work. That is the right trade on a dedicated worker and
-    # the wrong one on a shared desktop, so it is said out loud in the log.
-    logger.info(
-        "closing any running PowerPoint before starting",
-        extra={"stage": "powerpoint_open"},
-    )
-    terminate_powerpoint_processes()
+    ensure_usable_powerpoint(terminate_powerpoint_processes)
 
     last_error: Exception | None = None
     for attempt in (1, 2):
