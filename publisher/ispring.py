@@ -1,9 +1,15 @@
 """iSpring publishing adapters.
 
-The real publishing mechanism is unknown until scripts/probe_ispring.py is
-run on the installed Cloud PC version. This module ships a loud default and
-three empty adapters. Do not add guessed ProgIDs, executables, or ribbon
-identifiers here.
+Probing the installed Suite 11 (scripts/probe_ispring.py and
+scripts/probe_ispring_api.py) established that iSpring exposes no automation
+object, no add-in macro and no command line. Interface automation is therefore
+the only way to publish, and it lives in ``publisher.ispring_cloud``.
+
+Adapters:
+
+``not_configured``  the default; fails loudly
+``fake``            copies a checked-in fixture; unit tests only
+``uia``             the real one: PowerPoint's interface plus iSpring Cloud
 """
 
 from __future__ import annotations
@@ -23,10 +29,9 @@ FIXTURE_DIR = (
     Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "ispring_output"
 )
 
-_PROBE_HINT = (
-    "iSpring publishing is not configured. Run scripts/probe_ispring.py on the "
-    "Windows Cloud PC, then set ISPRING_ADAPTER to the adapter named in that "
-    "report and implement only the verified interface."
+_NOT_CONFIGURED_HINT = (
+    "iSpring publishing is not configured. Set ISPRING_ADAPTER=uia to publish "
+    "through the PowerPoint interface to iSpring Cloud."
 )
 
 
@@ -39,34 +44,15 @@ class ISpringAvailability:
 class ISpringPublisher(Protocol):
     def is_available(self) -> ISpringAvailability: ...
 
-    def publish(self, pptx: Path, output_dir: Path, timeout_s: int) -> Path: ...
+    def publish(self, pptx: Path, output_dir: Path, timeout_s: int): ...
 
 
 class NotConfiguredPublisher:
     def is_available(self) -> ISpringAvailability:
-        return ISpringAvailability(installed=False, detail=_PROBE_HINT)
+        return ISpringAvailability(installed=False, detail=_NOT_CONFIGURED_HINT)
 
     def publish(self, pptx: Path, output_dir: Path, timeout_s: int) -> Path:
-        raise ISpringNotConfiguredError(_PROBE_HINT)
-
-
-class UnverifiedAdapter(NotConfiguredPublisher):
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def is_available(self) -> ISpringAvailability:
-        return ISpringAvailability(
-            installed=False,
-            detail=(
-                f"ISPRING_ADAPTER={self._name} has no verified implementation. "
-                f"{_PROBE_HINT}"
-            ),
-        )
-
-    def publish(self, pptx: Path, output_dir: Path, timeout_s: int) -> Path:
-        raise ISpringNotConfiguredError(
-            f"ISPRING_ADAPTER={self._name} is a stub. {_PROBE_HINT}"
-        )
+        raise ISpringNotConfiguredError(_NOT_CONFIGURED_HINT)
 
 
 class FakePublisher:
@@ -89,14 +75,60 @@ class FakePublisher:
         return output_dir
 
 
+class CloudPublisher:
+    """Publishes to iSpring Cloud and reports the material's embed URL.
+
+    Nothing is written to ``output_dir``: the content lives in iSpring Cloud,
+    so this returns a URL where the other adapters return a folder.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    def is_available(self) -> ISpringAvailability:
+        import sys
+
+        if sys.platform != "win32":
+            return ISpringAvailability(
+                installed=False,
+                detail="iSpring Cloud publishing only runs on the Windows worker",
+            )
+        install_path = self._settings.ispring_install_path
+        if install_path and not Path(install_path).exists():
+            return ISpringAvailability(
+                installed=False, detail=f"ISPRING_INSTALL_PATH does not exist: {install_path}"
+            )
+        return ISpringAvailability(
+            installed=True, detail="Windows host; iSpring Suite interface automation"
+        )
+
+    def publish_to_cloud(self, pptx: Path, *, institution: str, content_name: str):
+        from publisher.ispring_cloud import publish_to_cloud
+
+        return publish_to_cloud(
+            Path(pptx),
+            institution=institution,
+            content_name=content_name,
+            parent_folder=self._settings.ispring_parent_folder,
+            cdp_url=self._settings.ispring_chrome_cdp_url,
+            publish_timeout_s=self._settings.ispring_publish_timeout_seconds,
+        )
+
+    def publish(self, pptx: Path, output_dir: Path, timeout_s: int):
+        raise ISpringNotConfiguredError(
+            "the uia adapter publishes to iSpring Cloud, not to a folder; call "
+            "publish_to_cloud() with the institution and content name"
+        )
+
+
 def get_publisher(settings: Settings) -> ISpringPublisher:
     choice = settings.ispring_adapter
     if choice == "fake":
         return FakePublisher()
     if choice == "not_configured":
         return NotConfiguredPublisher()
-    if choice in {"vba", "uia", "cli"}:
-        return UnverifiedAdapter(choice)
+    if choice == "uia":
+        return CloudPublisher(settings)
     raise ISpringNotConfiguredError(
-        f"unknown ISPRING_ADAPTER {choice!r}. {_PROBE_HINT}"
+        f"unknown ISPRING_ADAPTER {choice!r}. {_NOT_CONFIGURED_HINT}"
     )

@@ -52,9 +52,14 @@ class Settings(BaseSettings):
     powerpoint_kill_orphans: bool = False
     powerpoint_orphan_max_age_seconds: int = 3600
 
-    ispring_adapter: Literal["not_configured", "fake", "vba", "uia", "cli"] = (
-        "not_configured"
-    )
+    # vba and cli were removed: probing the installed Suite 11 showed the
+    # add-in has no automation object, no macro entry and no command line.
+    ispring_adapter: Literal["not_configured", "fake", "uia"] = "not_configured"
+    # Folder in iSpring Cloud that holds one project per institution.
+    ispring_parent_folder: str = "PPT Migration"
+    # Chrome to attach to for the share step. That browser must already be
+    # signed in to iSpring Cloud; see scripts/start_ispring_chrome.cmd.
+    ispring_chrome_cdp_url: str = "http://127.0.0.1:9222"
     storage_backend: Literal["local_fs", "s3", "http_api"] = "local_fs"
     browser_test_enabled: bool = True
 

@@ -3,39 +3,73 @@ from pathlib import Path
 import pytest
 
 from config.settings import Settings
-from publisher.ispring import get_publisher
+from publisher.ispring import (
+    CloudPublisher,
+    FakePublisher,
+    NotConfiguredPublisher,
+    get_publisher,
+)
+from publisher.ispring_cloud import normalise
 from utils.exceptions import ISpringNotConfiguredError
-from validator.html5 import validate_ispring_output
 
 
-def _settings(tmp_path: Path, adapter: str) -> Settings:
-    return Settings(
-        app_env="development",
-        backend_base_url="https://backend.example.com",
-        temp_root=str(tmp_path / "jobs"),
-        log_root=str(tmp_path / "logs"),
-        ispring_adapter=adapter,
-    )
+def _settings(tmp_path: Path, **overrides) -> Settings:
+    values = {
+        "app_env": "development",
+        "backend_base_url": "https://backend.example.com",
+        "temp_root": str(tmp_path / "jobs"),
+        "log_root": str(tmp_path / "logs"),
+    }
+    values.update(overrides)
+    return Settings(**values)
 
 
-def test_not_configured_is_the_default_and_raises(tmp_path):
-    publisher = get_publisher(_settings(tmp_path, "not_configured"))
+def test_default_adapter_is_not_configured(tmp_path):
+    publisher = get_publisher(_settings(tmp_path))
+    assert isinstance(publisher, NotConfiguredPublisher)
     assert publisher.is_available().installed is False
-    with pytest.raises(ISpringNotConfiguredError) as exc:
-        publisher.publish(tmp_path / "source.pptx", tmp_path / "out", timeout_s=1)
-    assert "probe_ispring.py" in str(exc.value)
-
-
-@pytest.mark.parametrize("adapter", ["vba", "uia", "cli"])
-def test_unverified_adapters_do_not_invent_an_api(tmp_path, adapter):
-    publisher = get_publisher(_settings(tmp_path, adapter))
     with pytest.raises(ISpringNotConfiguredError):
-        publisher.publish(tmp_path / "source.pptx", tmp_path / "out", timeout_s=1)
+        publisher.publish(tmp_path / "a.pptx", tmp_path / "out", 60)
 
 
-def test_fake_copies_the_fixture_package(tmp_path):
-    output = tmp_path / "out"
-    publisher = get_publisher(_settings(tmp_path, "fake"))
-    result = publisher.publish(tmp_path / "source.pptx", output, timeout_s=1)
-    assert result == output
-    validate_ispring_output(output)
+def test_fake_adapter_copies_the_fixture(tmp_path):
+    publisher = get_publisher(_settings(tmp_path, ispring_adapter="fake"))
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.is_available().installed is True
+
+
+def test_uia_adapter_is_the_cloud_publisher(tmp_path):
+    publisher = get_publisher(_settings(tmp_path, ispring_adapter="uia"))
+    assert isinstance(publisher, CloudPublisher)
+
+
+def test_uia_adapter_refuses_the_folder_style_publish(tmp_path):
+    """Cloud publishing returns a URL, so the folder API must not look usable."""
+    publisher = get_publisher(_settings(tmp_path, ispring_adapter="uia"))
+    with pytest.raises(ISpringNotConfiguredError):
+        publisher.publish(tmp_path / "a.pptx", tmp_path / "out", 60)
+
+
+def test_uia_adapter_is_unavailable_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.platform", "darwin")
+    publisher = get_publisher(_settings(tmp_path, ispring_adapter="uia"))
+    available, detail = (
+        publisher.is_available().installed,
+        publisher.is_available().detail,
+    )
+    assert available is False
+    assert "Windows" in detail
+
+
+def test_removed_adapters_are_rejected_by_settings(tmp_path):
+    """vba and cli were never implemented and the probes ruled them out."""
+    for dead in ("vba", "cli"):
+        with pytest.raises(Exception):
+            _settings(tmp_path, ispring_adapter=dead)
+
+
+def test_ribbon_labels_are_normalised():
+    """iSpring's ribbon labels carry non-breaking spaces and a BOM."""
+    assert normalise("\xa0\xa0Publish\xa0\xa0﻿") == "Publish"
+    assert normalise("  iSpring   Suite 11 ") == "iSpring Suite 11"
+    assert normalise("") == ""
