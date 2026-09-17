@@ -1673,6 +1673,38 @@ def open_result(page, name: str) -> bool:
 
 
 RECENT_RE = re.compile(r"^\s*recent\b", re.I)
+RECENT_PATH = "/app/s?s=recent"
+
+
+def site_root(page, cloud_url: str = "") -> str:
+    """The library's base URL, from the page we are on or the setting."""
+    raw = cloud_url or page.url or ""
+    return raw.split("/app/")[0].rstrip("/")
+
+
+def go_recent(page, cloud_url: str = "") -> bool:
+    """Load Recent from scratch.
+
+    Loading the URL rather than clicking the menu matters: the tab has often
+    been open since before the deck was published, so whatever it shows is
+    out of date and the new material simply is not in it. A fresh load is
+    the refresh.
+    """
+    target = f"{site_root(page, cloud_url)}{RECENT_PATH}"
+    try:
+        page.goto(target, wait_until="domcontentloaded", timeout=45000)
+    except Exception as exc:  # noqa: BLE001
+        _warn("could not load Recent; reloading this page instead",
+              url=target, error=str(exc))
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(3000)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+    page.wait_for_timeout(3500)
+    _note("loaded Recent", url=target)
+    return True
 
 
 def open_recent(page) -> bool:
@@ -1693,38 +1725,52 @@ def open_recent(page) -> bool:
     return True
 
 
-def locate_material(page, material: str, institution: str) -> bool:
+def locate_material(
+    page, material: str, institution: str, cloud_url: str = "", rounds: int = 3
+) -> bool:
     """Find the just-published material's row, however it can be found.
 
-    In order: search for it by name; search for the institution and open the
-    folder the search returns (the search lists the folder, not what is
-    inside it); Recent, where the newest is at the top; and finally walking
-    the library by hand.
+    iSpring Cloud needs a moment after a publish before the material shows up
+    in the library, and a tab that has been open since before the publish
+    never shows it at all. So every round starts by loading the page again,
+    and a round that finds nothing waits and tries once more.
+
+    Within a round: Recent first (the newest is at the top), then search by
+    name, then the folder a search returns, then walking the library.
     """
-    if scroll_hunt(page, material, tries=2) is not None:
-        return True
-
-    if search_library(page, material):
-        if scroll_hunt(page, material, tries=3) is not None:
+    for round_no in range(1, max(1, rounds) + 1):
+        if go_recent(page, cloud_url) and scroll_hunt(page, material, tries=3) is not None:
+            _note("found it in Recent", material=material, round=round_no)
             return True
-        # The result was the folder holding it, not the material.
-        if institution and open_result(page, institution):
-            if scroll_hunt(page, material, tries=8) is not None:
+
+        if search_library(page, material):
+            if scroll_hunt(page, material, tries=3) is not None:
+                _note("found it by name", material=material)
+                return True
+            # The search listed the folder that holds it, not the material.
+            if institution and open_result(page, institution):
+                if scroll_hunt(page, material, tries=8) is not None:
+                    _note("found it inside the folder the search returned")
+                    return True
+
+        if institution and search_library(page, institution):
+            if open_result(page, institution):
+                if scroll_hunt(page, material, tries=8) is not None:
+                    _note("found it in the institution folder", folder=institution)
+                    return True
+
+        if institution:
+            _note("walking the library", folder=institution)
+            if enter_folder(page, institution) and scroll_hunt(page, material, tries=10) is not None:
                 return True
 
-    if institution and search_library(page, institution):
-        if open_result(page, institution):
-            if scroll_hunt(page, material, tries=8) is not None:
-                return True
-
-    if open_recent(page) and scroll_hunt(page, material, tries=4) is not None:
-        _note("found it in Recent", material=material)
-        return True
-
-    if institution:
-        _note("falling back to walking the library", folder=institution)
-        if enter_folder(page, institution) and scroll_hunt(page, material, tries=10) is not None:
-            return True
+        if round_no < rounds:
+            _warn(
+                "not in the library yet; waiting and looking again",
+                material=material,
+                round=round_no,
+            )
+            page.wait_for_timeout(10000)
     return False
 
 
@@ -1946,7 +1992,7 @@ def fetch_embed(
         if dump_always():
             dump_page(page, "library")
 
-        if not locate_material(page, material, institution):
+        if not locate_material(page, material, institution, cloud_url=cloud_url):
             dump = dump_page(page, "material-not-found")
             raise ISpringPublishingError(
                 f"{material!r} was not found in the library (url {page.url}); "
