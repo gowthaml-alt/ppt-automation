@@ -229,15 +229,14 @@ def addin_ready(service) -> bool:
         )
         return False
 
+    from publisher.ispring_cloud import ribbon_tabs
+
     if has_addin_tab(window):
-        logger.info(
-            "iSpring tab is on the ribbon", extra={"stage": "powerpoint_open"}
-        )
         return True
 
     logger.warning(
-        "the iSpring tab is missing; switching the add-in on",
-        extra={"stage": "powerpoint_open"},
+        "the iSpring Suite tab is not on the ribbon; switching the add-in on",
+        extra={"stage": "powerpoint_open", "tabs": ribbon_tabs(window)},
     )
     if connect_addin(getattr(service, "app", None)) and has_addin_tab(window, timeout_s=30):
         logger.info(
@@ -308,7 +307,16 @@ def open_with_repair(pptx: Path, settings: Settings):
 
         # The deck is open. Nothing can be published without the iSpring tab,
         # so check it now and put the add-in back before going further.
-        if addin_ready(service) or attempt == 3:
+        if addin_ready(service):
+            in_use = service.current_pptx or pptx
+            return service, Path(in_use), watcher.answered
+        if attempt == 3:
+            logger.error(
+                "still no iSpring Suite tab after two repairs; publishing anyway "
+                "with whatever is on the ribbon. If this machine shows the "
+                "iSpring Free ribbon, the Suite licence is not active on it",
+                extra={"stage": "powerpoint_open"},
+            )
             in_use = service.current_pptx or pptx
             return service, Path(in_use), watcher.answered
 
@@ -322,9 +330,14 @@ def open_with_repair(pptx: Path, settings: Settings):
             pass
         terminate_powerpoint_processes()
         time.sleep(3)
-        # With PowerPoint closed the registry can be corrected; while it runs,
-        # Office simply writes these keys back on exit.
-        ensure_addin_enabled()
+        # This is exactly what scripts/fix_ispring_addin.py --fix does, and it
+        # only works with PowerPoint closed: Office writes these keys back as
+        # it exits, so repairing them under a running PowerPoint does nothing.
+        fixed = ensure_addin_enabled()
+        logger.info(
+            "ran the add-in repair",
+            extra={"stage": "powerpoint_open", "attempt": attempt, "ok": fixed},
+        )
         time.sleep(2)
 
     raise last_error  # unreachable; the loop either returns or raises

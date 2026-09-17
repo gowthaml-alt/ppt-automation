@@ -118,3 +118,20 @@ def test_no_ispring_tab_is_reported_as_missing():
 
     tab, name = find_ispring_tab(_FakeRibbon(["Home", "Insert", "Review"]))
     assert tab is None and name == ""
+
+
+def test_a_free_only_ribbon_is_not_ready_to_publish():
+    from publisher.ispring_cloud import has_addin_tab
+
+    window = _FakeRibbon(["Home", "Insert", "iSpring Free 11"])
+    # Free alone means Office disabled Suite: the repair has to run.
+    assert has_addin_tab(window, timeout_s=0) is False
+    # ...but the publish still goes ahead with it as a last resort.
+    assert has_addin_tab(window, timeout_s=0, require_suite=False) is True
+
+
+def test_a_suite_ribbon_is_ready():
+    from publisher.ispring_cloud import has_addin_tab
+
+    window = _FakeRibbon(["Home", "iSpring Suite 11"])
+    assert has_addin_tab(window, timeout_s=0) is True

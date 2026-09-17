@@ -48,6 +48,11 @@ PROJECT_DIALOG = "Select Project"
 PROGRESS_PREFIX = "Generating content"
 DONE_WINDOW = "iSpring Suite"
 RIBBON_TAB = "iSpring Suite 11"
+# The tab is not always called that. An unlicensed machine shows
+# "iSpring Free 11", and the version number moves with the release, so any
+# iSpring tab counts and the Suite one is preferred when both exist.
+ISPRING_TAB_RE = re.compile(r"^\s*ispring\b", re.I)
+FREE_TAB_RE = re.compile(r"\bfree\b", re.I)
 
 NUISANCE_TITLES = ("checking for updates", "update", "what's new")
 
@@ -431,22 +436,49 @@ def ribbon_tabs(window) -> list[str]:
     return names
 
 
-def has_addin_tab(window, timeout_s: float = 20) -> bool:
-    """Is the iSpring tab on the ribbon? Waits a little, never raises.
+def find_ispring_tab(window):
+    """The iSpring tab on the ribbon, whatever it is called.
 
-    Any tab whose name mentions iSpring counts, so a Suite version change
-    does not read as a missing add-in. Used before a publish to decide
-    whether the add-in has to be put back.
+    The name carries both the edition and the version — "iSpring Suite 11",
+    "iSpring Free 11" — so matching the exact string breaks on an unlicensed
+    machine or after an upgrade. Suite wins when both are present.
+
+    Returns ``(control, name)``, or ``(None, "")``.
+    """
+    found = []
+    try:
+        for tab in window.descendants(control_type="TabItem"):
+            name = normalise(tab.window_text())
+            if ISPRING_TAB_RE.match(name):
+                found.append((tab, name))
+    except Exception:  # noqa: BLE001
+        return None, ""
+    if not found:
+        return None, ""
+    found.sort(key=lambda pair: 0 if "suite" in pair[1].lower() else 1)
+    return found[0]
+
+
+def warn_if_free_edition(name: str) -> None:
+    if name and FREE_TAB_RE.search(name):
+        _warn(
+            "PowerPoint is showing the iSpring Free ribbon, not Suite. The "
+            "Suite licence is not active on this machine, and Free may not "
+            "offer publishing to iSpring Cloud",
+            tab=name,
+        )
+
+
+def has_addin_tab(window, timeout_s: float = 20) -> bool:
+    """Is an iSpring tab on the ribbon? Waits a little, never raises.
+
+    Used before a publish to decide whether the add-in has to be put back.
     """
     deadline = time.monotonic() + timeout_s
     while True:
-        try:
-            tab = window.child_window(title=RIBBON_TAB, control_type="TabItem")
-            if tab.exists():
-                return True
-        except Exception:  # noqa: BLE001
-            pass
-        if any("ispring" in name.lower() for name in ribbon_tabs(window)):
+        tab, name = find_ispring_tab(window)
+        if tab is not None:
+            warn_if_free_edition(name)
             return True
         if time.monotonic() >= deadline:
             return False
@@ -463,16 +495,19 @@ def wait_for_addin(window, timeout_s: float = 90):
     deadline = time.monotonic() + timeout_s
     waited = False
     while time.monotonic() < deadline:
-        tab = window.child_window(title=RIBBON_TAB, control_type="TabItem")
-        if tab.exists():
+        tab, name = find_ispring_tab(window)
+        if tab is not None:
             if waited:
-                _note("iSpring ribbon tab appeared")
+                _note("iSpring ribbon tab appeared", tab=name)
+            else:
+                _note("iSpring ribbon tab found", tab=name)
+            warn_if_free_edition(name)
             return tab
         waited = True
         dismiss_nuisance_dialogs(window)
         time.sleep(2)
     raise ISpringPublishingError(
-        f"ribbon tab {RIBBON_TAB!r} never appeared after {timeout_s:.0f}s; "
+        f"no iSpring tab appeared after {timeout_s:.0f}s; "
         f"tabs on the ribbon: {ribbon_tabs(window)}",
         user_message=(
             "The iSpring add-in did not load in PowerPoint. Check it is "
@@ -483,7 +518,7 @@ def wait_for_addin(window, timeout_s: float = 90):
 
 def open_publish_dialog(window):
     tab = wait_for_addin(window)
-    activate(tab, f"tab {RIBBON_TAB!r}")
+    activate(tab, f"tab {normalise(tab.window_text())!r}")
     time.sleep(1)
 
     button = find_ribbon_button(window, "Publish")
