@@ -160,21 +160,55 @@ def open_with_repair(pptx: Path, settings: Settings):
     and PowerPoint sometimes repairs silently — the prompt count is the other
     way of knowing it happened.
     """
-    from powerpoint.service import PowerPointService
+    from powerpoint.service import PowerPointService, terminate_powerpoint_processes
     from publisher.ispring_cloud import ensure_com
 
     ensure_com()
-    service = PowerPointService(settings)
-    service.start()
-    with RepairPromptWatcher() as watcher:
-        service.open(pptx, timeout_s=settings.powerpoint_open_timeout_seconds)
-    if watcher.answered:
-        logger.info(
-            "PowerPoint repaired the deck",
-            extra={"stage": "powerpoint_open", "prompts_answered": watcher.answered},
-        )
-    in_use = service.current_pptx or pptx
-    return service, Path(in_use), watcher.answered
+
+    # Start from a clean PowerPoint. A copy left running by an earlier job can
+    # be half dead — COM attaches to it, then Presentations.Open2007 is missing
+    # and every later call fails with a bare AttributeError.
+    #
+    # This closes ANY PowerPoint that is running, including one a person has
+    # open with unsaved work. That is the right trade on a dedicated worker and
+    # the wrong one on a shared desktop, so it is said out loud in the log.
+    logger.info(
+        "closing any running PowerPoint before starting",
+        extra={"stage": "powerpoint_open"},
+    )
+    terminate_powerpoint_processes()
+
+    last_error: Exception | None = None
+    for attempt in (1, 2):
+        service = PowerPointService(settings)
+        try:
+            service.start()
+            with RepairPromptWatcher() as watcher:
+                service.open(pptx, timeout_s=settings.powerpoint_open_timeout_seconds)
+        except PowerPointAutomationError as exc:
+            last_error = exc
+            try:
+                service.quit()
+            except Exception:  # noqa: BLE001
+                pass
+            terminate_powerpoint_processes()
+            if attempt == 1:
+                logger.warning(
+                    "PowerPoint would not open the deck; retrying with a fresh copy",
+                    extra={"stage": "powerpoint_open", "detail": str(exc)},
+                )
+                time.sleep(3)
+                continue
+            raise
+        if watcher.answered:
+            logger.info(
+                "PowerPoint repaired the deck",
+                extra={"stage": "powerpoint_open", "prompts_answered": watcher.answered},
+            )
+        in_use = service.current_pptx or pptx
+        return service, Path(in_use), watcher.answered
+
+    raise last_error  # unreachable; the loop either returns or raises
 
 
 def remove_workspace(workspace: Path, attempts: int = 5) -> bool:
