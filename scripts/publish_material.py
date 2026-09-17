@@ -80,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except PptAutomationError as exc:
         print(f"\nFAILED: {exc.user_message or exc}", file=sys.stderr)
+        # The polite message alone is not enough to fix anything.
+        if exc.message and exc.message != exc.user_message:
+            print(f"detail: {exc.message}", file=sys.stderr)
+        print(f"stage: {exc.stage}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)

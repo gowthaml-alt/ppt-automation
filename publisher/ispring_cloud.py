@@ -407,20 +407,55 @@ def wait_for(predicate, timeout_s: float, what: str, poll_s: float = 1.0):
     )
 
 
+def ribbon_tabs(window) -> list[str]:
+    names = []
+    try:
+        for tab in window.descendants(control_type="TabItem"):
+            name = normalise(tab.window_text())
+            if name:
+                names.append(name)
+    except Exception:  # noqa: BLE001
+        pass
+    return names
+
+
+def wait_for_addin(window, timeout_s: float = 90):
+    """Wait for the iSpring tab to appear on the ribbon.
+
+    The add-in loads a few seconds after PowerPoint starts, so a job that
+    restarts PowerPoint arrives before the tab exists. Waiting beats failing.
+    """
+    deadline = time.monotonic() + timeout_s
+    waited = False
+    while time.monotonic() < deadline:
+        tab = window.child_window(title=RIBBON_TAB, control_type="TabItem")
+        if tab.exists():
+            if waited:
+                _note("iSpring ribbon tab appeared")
+            return tab
+        waited = True
+        dismiss_nuisance_dialogs(window)
+        time.sleep(2)
+    raise ISpringPublishingError(
+        f"ribbon tab {RIBBON_TAB!r} never appeared after {timeout_s:.0f}s; "
+        f"tabs on the ribbon: {ribbon_tabs(window)}",
+        user_message=(
+            "The iSpring add-in did not load in PowerPoint. Check it is "
+            "enabled in File > Options > Add-ins."
+        ),
+    )
+
+
 def open_publish_dialog(window):
-    tab = window.child_window(title=RIBBON_TAB, control_type="TabItem")
-    if not tab.exists():
-        raise ISpringPublishingError(
-            f"ribbon tab {RIBBON_TAB!r} not found — is the add-in loaded?",
-            user_message=USER_PUBLISH_FAILED,
-        )
+    tab = wait_for_addin(window)
     activate(tab, f"tab {RIBBON_TAB!r}")
     time.sleep(1)
 
     button = find_ribbon_button(window, "Publish")
     if button is None:
         raise ISpringPublishingError(
-            "Publish button not found on the iSpring ribbon",
+            "Publish button not found on the iSpring ribbon; tabs present: "
+            f"{ribbon_tabs(window)}",
             user_message=USER_PUBLISH_FAILED,
         )
     activate(button, "ribbon Publish")
