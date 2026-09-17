@@ -20,6 +20,7 @@ desktop, and interface automation stops working there.
 from __future__ import annotations
 
 import logging
+import base64
 import os
 import re
 import time
@@ -72,6 +73,27 @@ POPUP_SELECTORS = (
     '[class*="popup"]',
     '[class*="modal"]',
 )
+# --- the library's own markup, read off harshit.ispring.com ----------------
+# Every row carries data-at="selected=<bool>;id=row-<uuid>", the title is a
+# link inside it, and the three dots only exist while the row is hovered.
+ROW_SELECTOR = 'tr[data-at*="id=row-"]'
+TITLE_SELECTOR = '[data-at="id=content-item-title"]'
+ROW_MENU_BUTTON = '[data-at="id=table-shortcut-menu-button"]'
+ROW_MENU_POPOVER = '[data-at="id=table-shortcut-menu-popover"]'
+SEARCH_INPUT = 'input[data-at="id=search-global-input"]'
+TABLE_BODY = '[data-at="id=table-body"]'
+
+# The share popup, likewise read off the live page.
+SHARE_MENU_ITEM = '[data-at="id=table-action-share"]'
+SHARE_POPUP = '[data-at="id=sharing-popup"]'
+PUBLIC_TOGGLE = '[data-at^="id=sharing-content-access-toggle"]'
+# Never touched: switching this on puts a password on the content.
+PASSWORD_TOGGLE = '[data-at^="id=sharing-content-password-access-toggle"]'
+LINK_FIELD = '[data-at^="id=sharing-content-link-field"]'
+EMBED_FIELD = '[data-at="id=sharing-embed-code-field"]'
+COVER_BUTTON = '[data-at="id=customize-cover-button"]'
+POPUP_CLOSE = '[data-at="id=popup-close-button"]'
+
 IFRAME_RE = re.compile(r"<iframe\b[^>]*>(?:.*?</iframe>)?", re.I | re.S)
 # The share popup shows the embed code as coloured text, not in a text box, and
 # clips it with an ellipsis. So the URL is taken directly, and the iframe is
@@ -1176,6 +1198,114 @@ def scroll_hunt(page, name: str, tries: int = 40):
     return None
 
 
+def wait_for_rows(page, timeout_s: float = 25) -> int:
+    """Wait until the content table has rows in it.
+
+    The list is drawn a few seconds after the page loads, so looking straight
+    after a navigation finds an empty table and reports the material missing.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            count = page.locator(ROW_SELECTOR).count()
+        except Exception:  # noqa: BLE001
+            count = 0
+        if count:
+            return count
+        if time.monotonic() >= deadline:
+            _warn("the content table is still empty", waited_s=round(timeout_s))
+            return 0
+        page.wait_for_timeout(1000)
+
+
+def row_titles(page, limit: int = 20) -> list[str]:
+    """The titles of the rows on screen, in order."""
+    titles: list[str] = []
+    try:
+        locator = page.locator(f"{ROW_SELECTOR} {TITLE_SELECTOR}")
+        count = min(locator.count(), limit)
+    except Exception:  # noqa: BLE001
+        return titles
+    for index in range(count):
+        try:
+            titles.append((locator.nth(index).inner_text() or "").strip())
+        except Exception:  # noqa: BLE001
+            continue
+    return titles
+
+
+def find_row(page, name: str, scrolls: int = 12):
+    """The row whose title is this material, by the library's own markup.
+
+    Exact title first: a search for "FA 4" also lists "20208952-FA_4
+    [Repaired]", and opening the wrong one gives the wrong iframe.
+    """
+    wanted = normalise(name).casefold()
+    wait_for_rows(page)
+    for attempt in range(max(1, scrolls)):
+        try:
+            rows = page.locator(ROW_SELECTOR)
+            count = rows.count()
+        except Exception:  # noqa: BLE001
+            count = 0
+        loose = None
+        for index in range(count):
+            row = rows.nth(index)
+            try:
+                title = normalise(row.locator(TITLE_SELECTOR).first.inner_text())
+            except Exception:  # noqa: BLE001
+                continue
+            folded = title.casefold()
+            if folded == wanted:
+                _note("found the row", title=title, scrolls=attempt)
+                try:
+                    row.scroll_into_view_if_needed(timeout=3000)
+                except Exception:  # noqa: BLE001
+                    pass
+                return row
+            if loose is None and wanted and wanted in folded:
+                loose = (row, title)
+        if loose is not None:
+            _note("no exact title; using the closest row", title=loose[1])
+            return loose[0]
+        try:
+            size = page.viewport_size or {"width": 1200, "height": 800}
+            page.mouse.move(size["width"] / 2, size["height"] / 2)
+            page.mouse.wheel(0, 700)
+            page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001
+            break
+    return None
+
+
+def open_row_menu_for(page, row) -> bool:
+    """Hover the row and press its three dots.
+
+    The button is not in the page until the row is hovered, and only a real
+    mouse move triggers that — a synthetic event does nothing.
+    """
+    try:
+        row.hover(timeout=5000)
+        page.wait_for_timeout(600)
+    except Exception as exc:  # noqa: BLE001
+        _warn("could not hover the row", error=str(exc))
+        return False
+    button = row.locator(ROW_MENU_BUTTON)
+    try:
+        button.wait_for(state="visible", timeout=5000)
+    except Exception:  # noqa: BLE001
+        _warn("the row's menu button did not appear on hover")
+        return False
+    if not safe_click(button.first, "three dots"):
+        return False
+    try:
+        page.locator(ROW_MENU_POPOVER).first.wait_for(state="visible", timeout=6000)
+    except Exception:  # noqa: BLE001
+        _warn("the row menu did not open")
+        return False
+    return True
+
+
 def visible_row_labels(page, limit: int = 25) -> list[str]:
     """The names of the rows on screen right now.
 
@@ -1314,6 +1444,9 @@ def open_row_menu(page, material: str) -> bool:
 
 
 def is_public(page) -> bool:
+    state = toggle_state(page)
+    if state is not None:
+        return state
     return visible_or_none(scope(page).get_by_text(NOT_PUBLIC_RE)) is None
 
 
@@ -1402,6 +1535,59 @@ def click_switch_beside_off(page) -> bool:
     return False
 
 
+def toggle_state(page) -> bool | None:
+    """Is link sharing on? Read from the site's own state attribute.
+
+    The toggle carries data-at="id=sharing-content-access-toggle;state=true"
+    or ";state=false", which is a far better answer than guessing from the
+    words on screen. None means the toggle was not found.
+    """
+    for frame in _frames(page):
+        try:
+            locator = frame.locator(PUBLIC_TOGGLE)
+            count = locator.count()
+        except Exception:  # noqa: BLE001
+            continue
+        for index in range(min(count, 3)):
+            try:
+                value = locator.nth(index).get_attribute("data-at") or ""
+            except Exception:  # noqa: BLE001
+                continue
+            if "state=true" in value:
+                return True
+            if "state=false" in value:
+                return False
+    return None
+
+
+def switch_public_toggle(page) -> bool:
+    """Click the link-sharing switch itself, by its data-at.
+
+    Deliberately never the second switch on the popup: that one is
+    "Restrict with password".
+    """
+    for frame in _frames(page):
+        try:
+            holder = visible_or_none(frame.locator(PUBLIC_TOGGLE))
+        except Exception:  # noqa: BLE001
+            continue
+        if holder is None:
+            continue
+        for what, getter in (
+            ("checkbox", lambda h=holder: h.locator("input[type=checkbox]").first),
+            ("switch", lambda h=holder: h),
+        ):
+            try:
+                target = getter()
+            except Exception:  # noqa: BLE001
+                continue
+            if _js_click(target) or safe_click(target, f"link toggle ({what})"):
+                page.wait_for_timeout(2000)
+                if toggle_state(page):
+                    return True
+    return False
+
+
 def make_viewable_via_link(page) -> bool:
     """Turn on "Make viewable via link" and prove it went on.
 
@@ -1409,6 +1595,14 @@ def make_viewable_via_link(page) -> bool:
     pointing at something nobody can open, so this has to succeed first and is
     verified rather than assumed.
     """
+    state = toggle_state(page)
+    if state is True:
+        _note("content already viewable via link")
+        return True
+    if state is False and switch_public_toggle(page):
+        _note("switched link sharing on")
+        return True
+
     if is_public(page):
         _note("content already viewable via link")
         return True
@@ -1472,6 +1666,18 @@ def read_embed_code(page) -> str:
     whole URL even though the display clips it); the preview link, which
     carries the same id as the embed player; and finally the Copy button.
     """
+    # The site puts the whole iframe in one element. Take it from there.
+    for frame in _frames(page):
+        try:
+            field = visible_or_none(frame.locator(EMBED_FIELD))
+            if field is not None:
+                text = (field.evaluate("el => el.textContent || ''") or "").strip()
+                if "<iframe" in text.lower():
+                    _note("read the embed code from the share popup")
+                    return " ".join(text.split())
+        except Exception:  # noqa: BLE001
+            continue
+
     root = scope(page)
 
     for selector in ("textarea", "input[type=text]", "input:not([type])"):
@@ -1555,6 +1761,12 @@ def close_popup(page) -> None:
         if popup_root(page) is None:
             _note("share popup closed")
             return
+        closer = visible_or_none(page.locator(POPUP_CLOSE))
+        if closer is not None and safe_click(closer, "popup close (X)"):
+            page.wait_for_timeout(900)
+            if popup_root(page) is None:
+                _note("share popup closed")
+                return
         try:
             page.keyboard.press("Escape")
             page.wait_for_timeout(900)
@@ -1679,6 +1891,20 @@ def search_library(page, term: str) -> bool:
     if popup_root(page) is not None:
         _warn("a popup is covering the library; closing it before searching")
         close_popup(page)
+
+    # The site puts the query in the URL as base64 of the escaped term —
+    # /app/s?s=search/RkElMjA0 for "FA 4". Going there is the same search
+    # without depending on a box being on screen.
+    encoded = base64.b64encode(quote(term).encode("utf-8")).decode("ascii")
+    target = f"{site_root(page)}/app/s?s=search%2F{encoded}"
+    try:
+        page.goto(target, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(2500)
+        wait_for_rows(page)
+        _note("searched by URL", term=term, url=target)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _warn("search by URL failed; trying the search box", error=str(exc))
 
     tried: list[str] = []
     for frame in _frames(page):
@@ -1834,37 +2060,29 @@ def locate_material(
     waits and looks again rather than failing.
     """
     for round_no in range(1, max(1, rounds) + 1):
-        go_library(page, cloud_url)
-
-        # 1. The folder, then scroll inside it. This is the reliable route:
-        # the search returns the institution's folder, not what is in it.
+        # 1. Search for the institution and open the folder it returns, then
+        # look inside it. This is the route to prefer when the project exists.
         if institution and search_library(page, institution):
-            if open_result(page, institution):
-                if scroll_hunt(page, material, tries=15) is not None:
-                    _note(
-                        "found it in the institution folder",
-                        folder=institution,
-                        round=round_no,
-                    )
-                    return True
-                _warn("opened the folder but the material is not in it yet",
+            if open_result(page, institution) and find_row(page, material) is not None:
+                _note("found it in the institution folder",
                       folder=institution, round=round_no)
-
-        # 2. Some materials come back from a search on their own name.
-        if search_library(page, material):
-            if scroll_hunt(page, material, tries=4) is not None:
-                _note("found it by name", material=material)
                 return True
 
-        # 3. Recent: the newest is at the top.
-        if go_recent(page, cloud_url) and scroll_hunt(page, material, tries=3) is not None:
-            _note("found it in Recent", material=material)
+        # 2. Search for the material itself.
+        if search_library(page, material) and find_row(page, material) is not None:
+            _note("found it by name", material=material, round=round_no)
+            return True
+
+        # 3. Recent: the newest is at the top. A deck that went to the parent
+        # folder because the institution has no project of its own is here.
+        if go_recent(page, cloud_url) and find_row(page, material) is not None:
+            _note("found it in Recent", material=material, round=round_no)
             return True
 
         # 4. No search at all: open the folder from the list and scroll.
         if institution:
             go_library(page, cloud_url)
-            if enter_folder(page, institution) and scroll_hunt(page, material, tries=15) is not None:
+            if enter_folder(page, institution) and find_row(page, material) is not None:
                 _note("found it by walking the library", folder=institution)
                 return True
 
@@ -1872,7 +2090,7 @@ def locate_material(
             "not listed yet",
             material=material,
             round=round_no,
-            on_screen=visible_row_labels(page, limit=15),
+            on_screen=row_titles(page, limit=15) or visible_row_labels(page, limit=10),
         )
         if round_no < rounds:
             page.wait_for_timeout(10000)
@@ -1930,51 +2148,50 @@ def popup_with_text(page, pattern):
     return None
 
 
-FOLDER_MENU_RE = re.compile(r"invite|rename|move to|new folder", re.I)
-
-
 def open_share(page, material: str) -> bool:
     """Open the row's three-dot menu and click Share.
 
-    The menu is drawn a moment after the click, and the first click sometimes
-    only selects the row, so this looks a few times and falls back to the
-    right-click menu before giving up. A menu with Invite and Rename but no
-    Share belongs to a folder, not to the material — that one is dismissed
-    and the row found again rather than clicked blindly.
+    Uses the library's own markup: find the row by its title, hover it so the
+    three dots appear, open the menu and click Share inside that menu — not
+    anywhere on the page, which is how a click used to land on the row behind.
     """
-    if not open_row_menu(page, material):
+    row = find_row(page, material)
+    if row is None:
+        _warn("no row for the material", material=material, on_screen=row_titles(page))
         return False
-    for attempt in range(1, 5):
-        page.wait_for_timeout(1200)
-        if click_by_role(page, SHARE_RE, what="Share"):
-            return True
 
-        labels = visible_menu_labels(page)[:20]
-        wrong_row = any(FOLDER_MENU_RE.search(label) for label in labels)
-        _warn(
-            "the menu that opened has no Share",
-            attempt=attempt,
-            folder_menu=wrong_row,
-            items=labels,
-        )
-        # Whatever opened, get rid of it before trying again: a menu left
-        # standing swallows the next click.
+    for attempt in range(1, 4):
+        if not open_row_menu_for(page, row):
+            page.wait_for_timeout(1000)
+            continue
+        menu = page.locator(ROW_MENU_POPOVER).first
+        share = visible_or_none(menu.locator(SHARE_MENU_ITEM))
+        if share is None:
+            share = visible_or_none(menu.get_by_text(SHARE_RE))
+        if share is not None and safe_click(share, "Share"):
+            page.wait_for_timeout(1500)
+            return True
+        items = []
+        try:
+            items = [
+                line.strip()
+                for line in (menu.inner_text() or "").splitlines()
+                if line.strip()
+            ]
+        except Exception:  # noqa: BLE001
+            pass
+        _warn("no Share in the row menu", attempt=attempt, items=items[:15])
         try:
             page.keyboard.press("Escape")
             page.wait_for_timeout(600)
         except Exception:  # noqa: BLE001
             pass
 
-        if attempt == 2:
-            found = scroll_hunt(page, material, tries=1)
-            if found is not None:
-                try:
-                    row_element(page, found).click(button="right", timeout=4000)
-                    _note("tried the right-click menu")
-                    continue
-                except Exception:  # noqa: BLE001
-                    pass
-        open_row_menu(page, material)
+    # Last resort: the old way, in case the markup has changed under us.
+    if open_row_menu(page, material):
+        page.wait_for_timeout(1200)
+        if click_by_role(page, SHARE_RE, what="Share"):
+            return True
     return False
 
 
@@ -1984,7 +2201,10 @@ def set_cover_title(page, title: str) -> bool:
     iSpring names the cover after the file it published, which is the working
     copy — "source" or "source.repaired" — so it has to be corrected here.
     """
-    if not click_by_role(page, COVER_RE, roles=("button", "link"), what="Edit cover image"):
+    cover = visible_or_none(page.locator(COVER_BUTTON))
+    if cover is not None:
+        safe_click(cover, "Edit cover image")
+    elif not click_by_role(page, COVER_RE, roles=("button", "link"), what="Edit cover image"):
         _warn("no Edit cover image button; leaving the cover title alone")
         return False
     page.wait_for_timeout(2000)
