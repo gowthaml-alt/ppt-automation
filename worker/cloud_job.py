@@ -327,6 +327,8 @@ def run_cloud_job(
             publish_timeout_s=settings.ispring_publish_timeout_seconds,
             close_powerpoint_after=False,
             skip_open=True,
+            browser_profile_dir=settings.ispring_chrome_profile_dir,
+            browser_path=settings.ispring_chrome_path,
         )
         published = True
     finally:

@@ -1116,13 +1116,93 @@ def close_popup(page) -> None:
         _note("share popup closed")
 
 
-def fetch_embed(material: str, institution: str, cdp_url: str) -> str:
+CHROME_PATHS = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+)
+
+
+def find_chrome(configured: str = "") -> str:
+    if configured and Path(configured).is_file():
+        return configured
+    for candidate in CHROME_PATHS:
+        if Path(candidate).is_file():
+            return candidate
+    import shutil as _shutil
+
+    return _shutil.which("chrome") or _shutil.which("msedge") or ""
+
+
+def debug_port_open(cdp_url: str, timeout_s: float = 2) -> bool:
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{cdp_url.rstrip('/')}/json/version", timeout=timeout_s):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def start_browser(cdp_url: str, profile_dir: str, chrome_path: str = "") -> bool:
+    """Start the browser the share step attaches to.
+
+    It has to run on its own profile directory: since Chrome 136 the remote
+    debugging port is ignored on the default profile, so the signed-in everyday
+    Chrome cannot be used no matter what. This profile keeps its own session,
+    which is why signing in once is enough.
+    """
+    import subprocess
+    from urllib.parse import urlsplit
+
+    executable = find_chrome(chrome_path)
+    if not executable:
+        _warn("no Chrome found to start; set ISPRING_CHROME_PATH")
+        return False
+    port = urlsplit(cdp_url).port or 9222
+    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+    _note("starting the share browser", executable=executable, port=port)
+    try:
+        subprocess.Popen(
+            [
+                executable,
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={profile_dir}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "https://harshit.ispring.com/",
+            ],
+            close_fds=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _warn("could not start the share browser", error=str(exc))
+        return False
+    for _ in range(30):
+        if debug_port_open(cdp_url):
+            _note("share browser is ready")
+            return True
+        time.sleep(1)
+    _warn("the share browser did not open its debug port in time")
+    return False
+
+
+def fetch_embed(
+    material: str,
+    institution: str,
+    cdp_url: str,
+    profile_dir: str = r"C:\ispring-chrome-profile",
+    chrome_path: str = "",
+) -> str:
     """Drive the Chrome that is already running and already signed in.
 
     Nothing is launched and no profile is created, so a login done once by
     hand in that Chrome keeps working for every run after it.
     """
     from playwright.sync_api import sync_playwright
+
+    if not debug_port_open(cdp_url):
+        _note("no browser on the debug port; starting one")
+        start_browser(cdp_url, profile_dir, chrome_path)
 
     with sync_playwright() as playwright:
         try:
@@ -1217,6 +1297,8 @@ def publish_to_cloud(
     publish_timeout_s: float = 1800,
     close_powerpoint_after: bool = True,
     skip_open: bool = False,
+    browser_profile_dir: str = r"C:\ispring-chrome-profile",
+    browser_path: str = "",
 ) -> CloudPublishResult:
     """Publish one deck and return its embed URL.
 
@@ -1267,7 +1349,13 @@ def publish_to_cloud(
             )
         time.sleep(10)  # let the browser open and settle
 
-        embed = fetch_embed(content_name or institution, institution, cdp_url)
+        embed = fetch_embed(
+            content_name or institution,
+            institution,
+            cdp_url,
+            profile_dir=browser_profile_dir,
+            chrome_path=browser_path,
+        )
     finally:
         if window is not None:
             try:

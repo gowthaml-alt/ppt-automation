@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # Chrome to attach to for the share step. That browser must already be
     # signed in to iSpring Cloud; see scripts/start_ispring_chrome.cmd.
     ispring_chrome_cdp_url: str = "http://127.0.0.1:9222"
+    # Its own profile folder: since Chrome 136 the debug port is ignored on the
+    # default profile, so the everyday signed-in Chrome cannot be attached to.
+    ispring_chrome_profile_dir: str = r"C:\ispring-chrome-profile"
+    ispring_chrome_path: str = ""
     storage_backend: Literal["local_fs", "s3", "http_api"] = "local_fs"
     browser_test_enabled: bool = True
 
