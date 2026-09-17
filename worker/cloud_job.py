@@ -220,12 +220,23 @@ def open_with_repair(pptx: Path, settings: Settings):
     and PowerPoint sometimes repairs silently — the prompt count is the other
     way of knowing it happened.
     """
+    from powerpoint.addin import ensure_addin_enabled
     from powerpoint.service import PowerPointService, terminate_powerpoint_processes
     from publisher.ispring_cloud import ensure_com
 
     ensure_com()
 
     ensure_usable_powerpoint(terminate_powerpoint_processes)
+
+    # With PowerPoint closed, put the add-in back if Office disabled it.
+    # Doing this while PowerPoint runs achieves nothing: it rewrites these
+    # keys when it exits.
+    if not ensure_addin_enabled() and not powerpoint_is_running():
+        logger.warning(
+            "continuing without a confirmed iSpring add-in; the publish will "
+            "fail if the ribbon tab does not appear",
+            extra={"stage": "powerpoint_open"},
+        )
 
     last_error: Exception | None = None
     for attempt in (1, 2):

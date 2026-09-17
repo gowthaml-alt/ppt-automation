@@ -109,3 +109,35 @@ def test_removing_a_missing_workspace_is_fine(tmp_path):
     from worker.cloud_job import remove_workspace
 
     assert remove_workspace(tmp_path / "never-existed") is True
+
+
+def test_addin_check_is_a_no_op_off_windows():
+    """The check must not explode where there is no registry to read."""
+    from powerpoint.addin import check_addin, ensure_addin_enabled
+
+    state = check_addin()
+    assert state.checked is False
+    assert state.healthy is True
+    assert ensure_addin_enabled() is True
+
+
+def test_addin_state_is_unhealthy_when_office_demoted_it():
+    from powerpoint.addin import AddinState
+
+    fine = AddinState(registered=["HKCU\\...\\iSpringSuite11.Connect"])
+    assert fine.healthy is True
+
+    demoted = AddinState(
+        registered=["HKCU\\...\\iSpringSuite11.Connect"],
+        demoted=["HKCU\\...\\iSpringSuite11.Connect (LoadBehavior=2)"],
+    )
+    assert demoted.healthy is False
+
+    switched_off = AddinState(
+        registered=["HKCU\\...\\iSpringSuite11.Connect"],
+        disabled_items=[("...\\DisabledItems", "item1")],
+    )
+    assert switched_off.healthy is False
+
+    missing = AddinState()
+    assert missing.healthy is False
