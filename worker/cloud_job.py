@@ -155,11 +155,15 @@ def open_with_repair(pptx: Path, settings: Settings):
     prompt from another thread — PowerPoint's COM open does not return while
     that dialog is up.
 
-    Returns ``(service, path_in_use)``. A repaired deck is saved under a new
-    name, so the path in use is not always the path passed in.
+    Returns ``(service, path_in_use, prompts_answered)``. A repaired deck is
+    saved under a new name, so the path in use is not always the one passed in,
+    and PowerPoint sometimes repairs silently — the prompt count is the other
+    way of knowing it happened.
     """
     from powerpoint.service import PowerPointService
+    from publisher.ispring_cloud import ensure_com
 
+    ensure_com()
     service = PowerPointService(settings)
     service.start()
     with RepairPromptWatcher() as watcher:
@@ -170,7 +174,7 @@ def open_with_repair(pptx: Path, settings: Settings):
             extra={"stage": "powerpoint_open", "prompts_answered": watcher.answered},
         )
     in_use = service.current_pptx or pptx
-    return service, Path(in_use)
+    return service, Path(in_use), watcher.answered
 
 
 def remove_workspace(workspace: Path, attempts: int = 5) -> bool:
@@ -228,8 +232,8 @@ def run_cloud_job(
             shutil.copy2(original, deck)
 
         damaged = inspect(deck)
-        service, in_use = open_with_repair(deck, settings)
-        repaired = damaged or in_use != deck
+        service, in_use, prompts = open_with_repair(deck, settings)
+        repaired = damaged or in_use != deck or prompts > 0
 
         result: CloudPublishResult = publish_to_cloud(
             in_use,

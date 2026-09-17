@@ -94,6 +94,23 @@ def _warn(message: str, **fields) -> None:
     logger.warning(message, extra={"stage": STAGE, **fields})
 
 
+def ensure_com() -> None:
+    """Initialise COM on this thread.
+
+    Both halves of this module reach COM through different libraries —
+    pywin32 for PowerPoint, comtypes underneath pywinauto — and each expects
+    COM to be ready on the thread it runs on. Calling this is cheap and safe
+    to repeat; skipping it produces "CoInitialize has not been called" at the
+    first pywinauto import.
+    """
+    try:
+        import pythoncom  # type: ignore
+
+        pythoncom.CoInitialize()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def normalise(text: str) -> str:
     """Ribbon labels carry non-breaking spaces and a BOM. Strip all of it."""
     cleaned = (text or "").replace("﻿", " ").replace("\xa0", " ")
@@ -202,6 +219,7 @@ def open_presentation(pptx: Path):
     """
     import win32com.client  # type: ignore
 
+    ensure_com()
     path = Path(pptx).expanduser().resolve()
     if not path.is_file():
         raise ISpringPublishingError(
@@ -229,6 +247,7 @@ def open_presentation(pptx: Path):
 
 
 def find_powerpoint_window():
+    ensure_com()
     from pywinauto import Application  # type: ignore
 
     app = Application(backend="uia").connect(path="POWERPNT.EXE", timeout=30)
@@ -317,21 +336,36 @@ class RepairPromptWatcher:
     def __enter__(self) -> "RepairPromptWatcher":
         import threading
 
+        # Import pywinauto here, on the caller's thread, so comtypes sets COM
+        # up for the main thread. Letting the watcher thread import it first
+        # leaves the main thread without COM once the watcher ends.
+        try:
+            ensure_com()
+            import pywinauto  # noqa: F401
+        except Exception:  # noqa: BLE001
+            _warn("pywinauto unavailable; repair prompts will not be answered")
+            return self
+
         self._stop = threading.Event()
 
         def loop() -> None:
+            ensure_com()
             try:
-                import comtypes  # type: ignore
-
-                comtypes.CoInitialize()
-            except Exception:  # noqa: BLE001
-                pass
-            while not self._stop.wait(self._poll_s):
+                while not self._stop.wait(self._poll_s):
+                    try:
+                        if answer_repair_prompt():
+                            self.answered += 1
+                    except Exception:  # noqa: BLE001
+                        continue
+            finally:
+                # Leave this thread's COM as we found it; the main thread's
+                # own initialisation must not be affected.
                 try:
-                    if answer_repair_prompt():
-                        self.answered += 1
+                    import pythoncom  # type: ignore
+
+                    pythoncom.CoUninitialize()
                 except Exception:  # noqa: BLE001
-                    continue
+                    pass
 
         self._thread = threading.Thread(
             target=loop, daemon=True, name="ppt-repair-prompt"
@@ -629,6 +663,7 @@ def close_powerpoint(app, pptx: Path) -> None:
     """Close the deck and quit PowerPoint, leaving nothing behind."""
     if app is None:
         return
+    ensure_com()
     target = Path(pptx).expanduser().resolve()
     try:
         for presentation in list(app.Presentations):
