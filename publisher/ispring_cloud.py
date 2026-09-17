@@ -1186,6 +1186,70 @@ def start_browser(cdp_url: str, profile_dir: str, chrome_path: str = "") -> bool
     return False
 
 
+SEARCH_BOX_SELECTORS = (
+    "input[type=search]",
+    "input[placeholder*='Search' i]",
+    "input[aria-label*='Search' i]",
+    "[role=searchbox]",
+    "input[name*='search' i]",
+)
+
+
+def search_library(page, term: str) -> bool:
+    """Type the material name into the library's search box.
+
+    Far better than scrolling: the list can be hundreds of rows long, and the
+    row we want is the one just published, which may be anywhere in it.
+    """
+    root = popup_root(page)
+    if root is not None:
+        return False  # a popup is covering the library
+    for frame in _frames(page):
+        for selector in SEARCH_BOX_SELECTORS:
+            try:
+                box = visible_or_none(frame.locator(selector))
+            except Exception:  # noqa: BLE001
+                continue
+            if box is None:
+                continue
+            try:
+                box.click(timeout=3000)
+                box.fill("")
+                box.type(term, delay=30)
+                box.press("Enter")
+                page.wait_for_timeout(2500)
+                _note("searched the library", term=term, selector=selector)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
+def open_result(page, name: str) -> bool:
+    """Click a row in the search results to open it.
+
+    Searching for the institution returns its folder, not the material inside
+    it, so the folder has to be opened before the material can be found.
+    """
+    pattern = re.compile(re.escape(name), re.I)
+    for frame in _frames(page):
+        row = visible_or_none(frame.get_by_text(pattern))
+        if row is None:
+            continue
+        for action in ("click", "dblclick"):
+            try:
+                getattr(row, action)(timeout=4000)
+                page.wait_for_timeout(2500)
+                _note("opened search result", name=name, how=action)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        if safe_click(row, f"search result {name}"):
+            page.wait_for_timeout(2500)
+            return True
+    return False
+
+
 def fetch_embed(
     material: str,
     institution: str,
@@ -1239,12 +1303,34 @@ def fetch_embed(
         if visible_or_none(page.get_by_text(re.compile(r"sign in|log in", re.I))) is not None:
             _warn("that Chrome may not be signed in to iSpring Cloud")
 
-        if scroll_hunt(page, material, tries=4) is None and institution:
-            if not enter_folder(page, institution):
-                raise ISpringPublishingError(
-                    f"could not open the folder {institution!r} in the library",
-                    user_message=USER_LINK_FAILED,
-                )
+        _note("browser is on", url=(page.url or "")[:200])
+
+        # The tab Manage Content opened is already in the right folder, so look
+        # there first, then search, and only scroll as a last resort.
+        found = scroll_hunt(page, material, tries=2) is not None
+
+        # Search finds the institution's folder, not what is inside it, so the
+        # folder is opened and the material looked for in there.
+        if not found and institution and search_library(page, institution):
+            if open_result(page, institution):
+                found = scroll_hunt(page, material, tries=8) is not None
+
+        # Some materials are found by name directly.
+        if not found and search_library(page, material):
+            found = scroll_hunt(page, material, tries=2) is not None
+
+        if not found and institution:
+            _note("falling back to walking the library", folder=institution)
+            if enter_folder(page, institution):
+                found = scroll_hunt(page, material, tries=8) is not None
+        if not found:
+            raise ISpringPublishingError(
+                f"{material!r} was not found in the library (url {page.url})",
+                user_message=(
+                    f"The published material {material!r} could not be found in "
+                    "iSpring Cloud to read its share link."
+                ),
+            )
 
         if not open_row_menu(page, material):
             raise ISpringPublishingError(
