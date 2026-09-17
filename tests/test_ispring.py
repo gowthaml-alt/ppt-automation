@@ -78,3 +78,43 @@ def test_ribbon_labels_are_normalised():
     assert normalise("\xa0\xa0Publish\xa0\xa0﻿") == "Publish"
     assert normalise("  iSpring   Suite 11 ") == "iSpring Suite 11"
     assert normalise("") == ""
+
+
+class _FakeTab:
+    def __init__(self, name):
+        self._name = name
+
+    def window_text(self):
+        return self._name
+
+
+class _FakeRibbon:
+    def __init__(self, names):
+        self._names = names
+
+    def descendants(self, control_type=None):
+        return [_FakeTab(name) for name in self._names]
+
+
+def test_the_free_edition_tab_is_accepted():
+    from publisher.ispring_cloud import find_ispring_tab
+
+    window = _FakeRibbon(["Home", "Insert", "View", "iSpring Free 11"])
+    tab, name = find_ispring_tab(window)
+    assert tab is not None
+    assert name == "iSpring Free 11"
+
+
+def test_suite_wins_when_both_tabs_are_present():
+    from publisher.ispring_cloud import find_ispring_tab
+
+    window = _FakeRibbon(["Home", "iSpring Free 11", "iSpring Suite 11"])
+    _tab, name = find_ispring_tab(window)
+    assert name == "iSpring Suite 11"
+
+
+def test_no_ispring_tab_is_reported_as_missing():
+    from publisher.ispring_cloud import find_ispring_tab
+
+    tab, name = find_ispring_tab(_FakeRibbon(["Home", "Insert", "Review"]))
+    assert tab is None and name == ""
