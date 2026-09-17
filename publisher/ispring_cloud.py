@@ -90,6 +90,10 @@ PUBLIC_TOGGLE_RE = re.compile(r"viewable via link|public|share.*link", re.I)
 NOT_PUBLIC_RE = re.compile(r"not publicly accessible", re.I)
 OFF_RE = re.compile(r"^\s*off\s*$", re.I)
 
+# After PowerPoint says publishing is complete, iSpring keeps uploading to
+# the cloud for a few seconds. ISPRING_UPLOAD_WAIT overrides this.
+UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "15"))
+
 USER_PUBLISH_FAILED = "The presentation could not be published to iSpring Cloud."
 USER_LINK_FAILED = "The presentation was published but no share link could be read."
 
@@ -1777,6 +1781,7 @@ def locate_material(
 COVER_RE = re.compile(r"edit cover image", re.I)
 COVER_DIALOG_RE = re.compile(r"cover image settings", re.I)
 SAVE_RE = re.compile(r"^\s*save\s*$", re.I)
+CANCEL_RE = re.compile(r"^\s*cancel\s*$", re.I)
 TITLE_LABEL_RE = re.compile(r"^\s*title\s*$", re.I)
 
 
@@ -1899,6 +1904,29 @@ def set_cover_title(page, title: str) -> bool:
     if box is None:
         _warn("no title box in the cover image dialog")
         return False
+
+    # Already right: close the dialog without saving. Saving an unchanged
+    # title is a pointless write, and it makes iSpring rebuild the cover.
+    try:
+        current = (box.input_value(timeout=3000) or "").strip()
+    except Exception:  # noqa: BLE001
+        current = ""
+    if current and current.casefold() == title.strip().casefold():
+        _note("cover title is already the material name; cancelling", title=current)
+        for locator in (
+            dialog.get_by_role("button", name=CANCEL_RE),
+            dialog.get_by_text(CANCEL_RE),
+        ):
+            found = visible_or_none(locator)
+            if found is not None and safe_click(found, "Cancel (cover title)"):
+                page.wait_for_timeout(1200)
+                return True
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(1200)
+        except Exception:  # noqa: BLE001
+            pass
+        return True
 
     try:
         box.click(timeout=4000)
@@ -2113,6 +2141,12 @@ def publish_to_cloud(
             time.sleep(10)
         else:
             close_ispring_windows(window)
+
+        # "Publishing is complete!" means PowerPoint has finished; iSpring is
+        # still uploading the content to the cloud for a few seconds after
+        # that. Going to the browser too early finds a library without it.
+        _note("waiting for the upload to finish", seconds=UPLOAD_SETTLE_S)
+        time.sleep(UPLOAD_SETTLE_S)
 
         embed = fetch_embed(
             content_name or institution,
