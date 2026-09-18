@@ -1234,40 +1234,118 @@ def row_titles(page, limit: int = 20) -> list[str]:
     return titles
 
 
-def find_row(page, name: str, scrolls: int = 12):
+ROW_SCAN_JS = """
+() => [...document.querySelectorAll('tr[data-at*="id=row-"]')].map((row, index) => ({
+  index,
+  id: (row.getAttribute('data-at') || '').replace(/^.*id=row-/, ''),
+  title: (row.querySelector('[data-at="id=content-item-title"]')?.innerText || '').trim(),
+  cells: [...row.children].map(c => (c.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean),
+}))
+"""
+
+# "Sep 17, 2026, 3:18 PM" — the modified column.
+ROW_DATE_RE = re.compile(r"[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4},\s+\d{1,2}:\d{2}\s*[AP]M")
+
+
+def scan_rows(page) -> list[dict]:
+    """Every row on screen: its id, title and the text of each cell."""
+    for frame in _frames(page):
+        try:
+            rows = frame.evaluate(ROW_SCAN_JS)
+        except Exception:  # noqa: BLE001
+            continue
+        if rows:
+            return rows
+    return []
+
+
+def row_modified(row: dict):
+    """When the row says it was last modified, for choosing between twins."""
+    from datetime import datetime
+
+    for cell in row.get("cells", []):
+        match = ROW_DATE_RE.search(cell)
+        if not match:
+            continue
+        text = re.sub(r"\s+", " ", match.group(0))
+        for pattern in ("%b %d, %Y, %I:%M %p", "%b %d, %Y %I:%M %p"):
+            try:
+                return datetime.strptime(text, pattern)
+            except ValueError:
+                continue
+    return None
+
+
+def row_folder(row: dict) -> str:
+    """The project/folder cell, which iSpring writes as "Parent / Child"."""
+    for cell in row.get("cells", []):
+        if "/" in cell:
+            return cell
+    cells = row.get("cells", [])
+    return cells[2] if len(cells) > 2 else ""
+
+
+def check_folder(row: dict, institution: str) -> None:
+    """Say so when the deck did not land in the institution's own project.
+
+    iSpring drops the content in the parent folder when the institution has
+    no project of its own, and says nothing about it. The iframe still works,
+    so this is a warning, not a failure.
+    """
+    if not institution:
+        return
+    folder = row_folder(row)
+    if folder and institution.casefold() not in folder.casefold():
+        _warn(
+            "the material is not in the institution's own project",
+            folder=folder,
+            institution=institution,
+        )
+    elif folder:
+        _note("material is in the right project", folder=folder)
+
+
+def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
     """The row whose title is this material, by the library's own markup.
 
     Exact title first: a search for "FA 4" also lists "20208952-FA_4
-    [Repaired]", and opening the wrong one gives the wrong iframe.
+    [Repaired]", and opening the wrong one gives the wrong iframe. When two
+    rows carry the same title — the same deck published twice — the newest
+    one wins, because that is the one just published.
     """
     wanted = normalise(name).casefold()
     wait_for_rows(page)
     for attempt in range(max(1, scrolls)):
-        try:
-            rows = page.locator(ROW_SELECTOR)
-            count = rows.count()
-        except Exception:  # noqa: BLE001
-            count = 0
-        loose = None
-        for index in range(count):
-            row = rows.nth(index)
-            try:
-                title = normalise(row.locator(TITLE_SELECTOR).first.inner_text())
-            except Exception:  # noqa: BLE001
-                continue
-            folded = title.casefold()
-            if folded == wanted:
-                _note("found the row", title=title, scrolls=attempt)
-                try:
-                    row.scroll_into_view_if_needed(timeout=3000)
-                except Exception:  # noqa: BLE001
-                    pass
-                return row
-            if loose is None and wanted and wanted in folded:
-                loose = (row, title)
-        if loose is not None:
-            _note("no exact title; using the closest row", title=loose[1])
-            return loose[0]
+        rows = scan_rows(page)
+        exact = [r for r in rows if normalise(r.get("title", "")).casefold() == wanted]
+        if exact:
+            if len(exact) > 1:
+                exact.sort(
+                    key=lambda r: (row_modified(r) is not None, row_modified(r)),
+                    reverse=True,
+                )
+                _warn(
+                    "several materials share this title; taking the newest",
+                    title=name,
+                    copies=len(exact),
+                    folders=[row_folder(r) for r in exact][:4],
+                )
+            chosen = exact[0]
+            check_folder(chosen, institution)
+            _note(
+                "found the row",
+                title=chosen.get("title"),
+                folder=row_folder(chosen),
+                scrolls=attempt,
+            )
+            return row_locator(page, chosen)
+
+        loose = [r for r in rows if wanted and wanted in normalise(r.get("title", "")).casefold()]
+        if loose:
+            _note("no exact title; using the closest row", title=loose[0].get("title"))
+            check_folder(loose[0], institution)
+            return row_locator(page, loose[0])
+
         try:
             size = page.viewport_size or {"width": 1200, "height": 800}
             page.mouse.move(size["width"] / 2, size["height"] / 2)
@@ -1276,6 +1354,21 @@ def find_row(page, name: str, scrolls: int = 12):
         except Exception:  # noqa: BLE001
             break
     return None
+
+
+def row_locator(page, row: dict):
+    """A handle on the row this scan described, by its own id."""
+    locator = None
+    identifier = row.get("id") or ""
+    if identifier:
+        locator = page.locator(f'tr[data-at*="id=row-{identifier}"]').first
+    if locator is None:
+        locator = page.locator(ROW_SELECTOR).nth(int(row.get("index", 0)))
+    try:
+        locator.scroll_into_view_if_needed(timeout=3000)
+    except Exception:  # noqa: BLE001
+        pass
+    return locator
 
 
 def open_row_menu_for(page, row) -> bool:
@@ -1872,6 +1965,7 @@ def start_browser(cdp_url: str, profile_dir: str, chrome_path: str = "") -> bool
 
 
 SEARCH_BOX_SELECTORS = (
+    SEARCH_INPUT,  # the library's own box, read off the live page
     "input[type=search]",
     "input[placeholder*='Search' i]",
     "input[aria-label*='Search' i]",
@@ -1881,30 +1975,21 @@ SEARCH_BOX_SELECTORS = (
 
 
 def search_library(page, term: str) -> bool:
-    """Type the material name into the library's search box.
+    """Type the term into the library's search box and press Enter.
 
-    Far better than scrolling: the list can be hundreds of rows long, and the
-    row we want is the one just published, which may be anywhere in it.
+    The box is ``input[data-at="id=search-global-input"]`` at the top of the
+    page. Typing is the way the site is meant to be used, so it is what this
+    does; asking for the results URL is only a fallback for when the box is
+    not on screen at all.
+
+    Returns True when the results have been asked for — not that the material
+    is in them. The caller checks that.
     """
     # A popup over the library swallows the click. Close it and carry on:
     # giving up here is what made the search never run at all.
     if popup_root(page) is not None:
         _warn("a popup is covering the library; closing it before searching")
         close_popup(page)
-
-    # The site puts the query in the URL as base64 of the escaped term —
-    # /app/s?s=search/RkElMjA0 for "FA 4". Going there is the same search
-    # without depending on a box being on screen.
-    encoded = base64.b64encode(quote(term).encode("utf-8")).decode("ascii")
-    target = f"{site_root(page)}/app/s?s=search%2F{encoded}"
-    try:
-        page.goto(target, wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_timeout(2500)
-        wait_for_rows(page)
-        _note("searched by URL", term=term, url=target)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        _warn("search by URL failed; trying the search box", error=str(exc))
 
     tried: list[str] = []
     for frame in _frames(page):
@@ -1918,30 +2003,46 @@ def search_library(page, term: str) -> bool:
                 tried.append(f"{selector}: none visible")
                 continue
             try:
-                box.click(timeout=3000)
+                box.click(timeout=4000)
+                page.wait_for_timeout(300)
                 box.fill("")
-                box.type(term, delay=30)
+                page.wait_for_timeout(300)
+                box.type(term, delay=60)
+                page.wait_for_timeout(600)
                 box.press("Enter")
                 page.wait_for_timeout(3000)
-                _note("searched the library", term=term, selector=selector)
+                wait_for_rows(page)
+                typed = ""
+                try:
+                    typed = box.input_value(timeout=2000) or ""
+                except Exception:  # noqa: BLE001
+                    pass
+                _note(
+                    "searched the library",
+                    term=term,
+                    selector=selector,
+                    box_holds=typed,
+                    results=len(row_titles(page, limit=5)),
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 tried.append(f"{selector}: {exc.__class__.__name__}")
                 continue
 
-    # Nothing to type into. Ask the site for the results page directly —
-    # it is the same search, just without the box.
-    for path in ("/app/s?q={term}", "/app/search?q={term}"):
-        target = f"{site_root(page)}{path.format(term=quote(term))}"
-        try:
-            page.goto(target, wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(3000)
-            _note("searched by URL", term=term, url=target)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            tried.append(f"{target}: {exc.__class__.__name__}")
-
-    _warn("no search box on the page", term=term, attempts=tried[:10])
+    # No box to type into. The site keeps the query in the URL as base64 of
+    # the escaped term, so this asks for the same results page directly.
+    _warn("no search box on the page; asking for the results URL",
+          term=term, attempts=tried[:8])
+    encoded = base64.b64encode(quote(term).encode("utf-8")).decode("ascii")
+    target = f"{site_root(page)}/app/s?s=search%2F{encoded}"
+    try:
+        page.goto(target, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(2500)
+        wait_for_rows(page)
+        _note("searched by URL", term=term, url=target)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _warn("search by URL failed too", term=term, error=str(exc))
     return False
 
 
@@ -2063,26 +2164,26 @@ def locate_material(
         # 1. Search for the institution and open the folder it returns, then
         # look inside it. This is the route to prefer when the project exists.
         if institution and search_library(page, institution):
-            if open_result(page, institution) and find_row(page, material) is not None:
+            if open_result(page, institution) and find_row(page, material, institution=institution) is not None:
                 _note("found it in the institution folder",
                       folder=institution, round=round_no)
                 return True
 
         # 2. Search for the material itself.
-        if search_library(page, material) and find_row(page, material) is not None:
+        if search_library(page, material) and find_row(page, material, institution=institution) is not None:
             _note("found it by name", material=material, round=round_no)
             return True
 
         # 3. Recent: the newest is at the top. A deck that went to the parent
         # folder because the institution has no project of its own is here.
-        if go_recent(page, cloud_url) and find_row(page, material) is not None:
+        if go_recent(page, cloud_url) and find_row(page, material, institution=institution) is not None:
             _note("found it in Recent", material=material, round=round_no)
             return True
 
         # 4. No search at all: open the folder from the list and scroll.
         if institution:
             go_library(page, cloud_url)
-            if enter_folder(page, institution) and find_row(page, material) is not None:
+            if enter_folder(page, institution) and find_row(page, material, institution=institution) is not None:
                 _note("found it by walking the library", folder=institution)
                 return True
 

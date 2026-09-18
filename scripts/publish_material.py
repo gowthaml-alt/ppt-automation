@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 from config.settings import get_settings  # noqa: E402
 from utils.exceptions import PptAutomationError  # noqa: E402
 from utils.logging_config import bind_job_context, configure_logging  # noqa: E402
+from worker import health  # noqa: E402
 from worker.cloud_job import run_cloud_job  # noqa: E402
 
 
@@ -54,6 +55,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Leave the downloaded and repaired files on disk",
     )
+    parser.add_argument(
+        "--ignore-health",
+        action="store_true",
+        help="Run even when this worker is marked unhealthy",
+    )
     args = parser.parse_args(argv)
 
     if sys.platform != "win32":
@@ -67,6 +73,16 @@ def main(argv: list[str] | None = None) -> int:
     except (TypeError, ValueError):
         pass
 
+    if not args.ignore_health and not health.should_take_work(settings.log_root):
+        state = health.load(settings.log_root)
+        print(
+            f"\nSTOPPED: this worker is marked unhealthy ({state.reason}).\n"
+            f"Fix the machine, then clear it:\n"
+            f"    python scripts\\worker_health.py --clear",
+            file=sys.stderr,
+        )
+        return 3
+
     try:
         result = run_cloud_job(
             url=args.url or "",
@@ -79,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
             keep_files=args.keep_files,
         )
     except PptAutomationError as exc:
+        health.record_failure(
+            settings.log_root, stage=exc.stage or "", message=exc.message or str(exc)
+        )
         print(f"\nFAILED: {exc.user_message or exc}", file=sys.stderr)
         # The polite message alone is not enough to fix anything.
         if exc.message and exc.message != exc.user_message:
@@ -89,9 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         print("interrupted", file=sys.stderr)
         return 130
     except Exception as exc:  # noqa: BLE001
+        health.record_failure(
+            settings.log_root, stage="unknown", message=f"{type(exc).__name__}: {exc}"
+        )
         print(f"\nFAILED (unexpected): {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
+    health.record_success(settings.log_root)
     print("\nPUBLISH OK")
     print(f"material_id={args.material_id}")
     print(f"content_name={result.content_name}")
