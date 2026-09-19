@@ -189,3 +189,65 @@ def test_missing_tab_that_cannot_be_switched_on_asks_for_a_restart(monkeypatch):
 
     _patch_addin_check(monkeypatch, tab_states=[False, False], connected=True)
     assert addin_ready(object()) is False
+
+
+def test_the_deck_is_published_under_its_id_not_its_name(monkeypatch, tmp_path):
+    """The Suite publish name is the id; the cloud cover keeps the name.
+
+    Two materials can share a title, and the browser half then cannot tell
+    which row it just published. An id is unique, so it is what goes in the
+    publish dialog.
+    """
+    import worker.cloud_job as job
+
+    seen = {}
+
+    def _publish(pptx, **kwargs):
+        seen.update(kwargs)
+        return type("R", (), {"iframe_url": "u", "embed_code": "e", "elapsed_s": 1})()
+
+    monkeypatch.setattr(job, "publish_to_cloud", _publish)
+    monkeypatch.setattr(job, "inspect", lambda _p: False)
+    monkeypatch.setattr(
+        job, "open_with_repair", lambda deck, _s: (None, deck, 0)
+    )
+
+    source = tmp_path / "deck.pptx"
+    source.write_bytes(minimal_pptx_bytes())
+
+    job.run_cloud_job(
+        pptx=str(source),
+        material_name="Kickoff and Advanced Prompting",
+        material_id=20242897,
+        asset_id=88214,
+        institution_name="Demoacademy",
+        settings=_settings(tmp_path),
+    )
+
+    assert seen["content_name"] == "88214"          # the Suite dialog
+    assert seen["cover_title"] == "Kickoff and Advanced Prompting"  # the cloud
+
+
+def test_without_an_asset_id_the_material_id_is_used(monkeypatch, tmp_path):
+    import worker.cloud_job as job
+
+    seen = {}
+    monkeypatch.setattr(
+        job, "publish_to_cloud",
+        lambda pptx, **kw: (seen.update(kw),
+                            type("R", (), {"iframe_url": "u", "embed_code": "e", "elapsed_s": 1})())[1],
+    )
+    monkeypatch.setattr(job, "inspect", lambda _p: False)
+    monkeypatch.setattr(job, "open_with_repair", lambda deck, _s: (None, deck, 0))
+
+    source = tmp_path / "deck.pptx"
+    source.write_bytes(minimal_pptx_bytes())
+
+    job.run_cloud_job(
+        pptx=str(source),
+        material_name="Kickoff",
+        material_id=20242897,
+        institution_name="Demoacademy",
+        settings=_settings(tmp_path),
+    )
+    assert seen["content_name"] == "20242897"

@@ -44,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--pptx", help="Local .pptx, instead of downloading one")
     parser.add_argument("--material-name", required=True)
     parser.add_argument("--material-id", required=True)
+    parser.add_argument(
+        "--asset-id",
+        default="",
+        help="Publish under this id instead of the material id",
+    )
     parser.add_argument("--institution-name", required=True)
     parser.add_argument(
         "--content-name",
@@ -91,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             material_id=args.material_id,
             institution_name=args.institution_name,
             settings=settings,
+            asset_id=args.asset_id,
             content_name=args.content_name,
             keep_files=args.keep_files,
         )
@@ -117,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     health.record_success(settings.log_root)
     print("\nPUBLISH OK")
     print(f"material_id={args.material_id}")
-    print(f"content_name={result.content_name}")
+    print(f"published_as={result.content_name}")
     print(f"source_name={result.source_name}")
     print(f"repaired={result.repaired}")
     print(f"iframe_url={result.iframe_url}")

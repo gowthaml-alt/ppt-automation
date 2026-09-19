@@ -2381,6 +2381,7 @@ def fetch_embed(
     profile_dir: str = r"C:\ispring-chrome-profile",
     chrome_path: str = "",
     cloud_url: str = "https://harshit.ispring.com/",
+    cover_title: str = "",
 ) -> str:
     """Drive the Chrome that is already running and already signed in.
 
@@ -2472,8 +2473,9 @@ def fetch_embed(
             )
         page.wait_for_timeout(2000)
 
-        # The cover is titled after the working copy, not the material.
-        set_cover_title(page, material)
+        # The deck is published under its id, so the cover would read "88214"
+        # unless it is set to the name a person expects to see.
+        set_cover_title(page, cover_title or material)
 
         embed = read_embed_code(page)
         if not embed:
@@ -2512,6 +2514,7 @@ def publish_to_cloud(
     browser_path: str = "",
     cloud_url: str = "https://harshit.ispring.com/",
     press_manage_content: bool = False,
+    cover_title: str = "",
 ) -> CloudPublishResult:
     """Publish one deck and return its embed URL.
 
@@ -2577,6 +2580,7 @@ def publish_to_cloud(
             profile_dir=browser_profile_dir,
             chrome_path=browser_path,
             cloud_url=cloud_url,
+            cover_title=cover_title,
         )
     finally:
         if window is not None:

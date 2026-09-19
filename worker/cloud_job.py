@@ -373,10 +373,17 @@ def run_cloud_job(
     material_id: int | str,
     institution_name: str,
     settings: Settings,
+    asset_id: int | str = "",
     content_name: str = "",
     keep_files: bool = False,
 ) -> CloudJobResult:
-    """Download, repair if needed, publish, and return the iframe URL."""
+    """Download, repair if needed, publish, and return the iframe URL.
+
+    The deck is published under its id, not its name: two materials can share
+    a name, and the browser half then has no way to tell which row is the one
+    just published. The name a person should see is set on the cover instead.
+    """
+    publish_name = str(content_name or asset_id or material_id).strip()
     if not url and not pptx:
         raise ValueError("pass either url or pptx")
     started = time.monotonic()
@@ -404,7 +411,8 @@ def run_cloud_job(
         result: CloudPublishResult = publish_to_cloud(
             in_use,
             institution=institution_name,
-            content_name=content_name or material_name,
+            content_name=publish_name,
+            cover_title=material_name,
             parent_folder=settings.ispring_parent_folder,
             cdp_url=settings.ispring_chrome_cdp_url,
             publish_timeout_s=settings.ispring_publish_timeout_seconds,
@@ -439,7 +447,7 @@ def run_cloud_job(
     return CloudJobResult(
         iframe_url=result.iframe_url,
         embed_code=result.embed_code,
-        content_name=content_name or material_name,
+        content_name=publish_name,
         source_name=source_name,
         repaired=repaired,
         elapsed_s=time.monotonic() - started,
