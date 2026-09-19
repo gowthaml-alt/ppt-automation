@@ -191,7 +191,7 @@ def test_missing_tab_that_cannot_be_switched_on_asks_for_a_restart(monkeypatch):
     assert addin_ready(object()) is False
 
 
-def test_the_deck_is_published_under_its_id_not_its_name(monkeypatch, tmp_path):
+def test_the_deck_is_published_under_the_queue_id_not_its_name(monkeypatch, tmp_path):
     """The Suite publish name is the id; the cloud cover keeps the name.
 
     Two materials can share a title, and the browser half then cannot tell
@@ -219,16 +219,16 @@ def test_the_deck_is_published_under_its_id_not_its_name(monkeypatch, tmp_path):
         pptx=str(source),
         material_name="Kickoff and Advanced Prompting",
         material_id=20242897,
-        asset_id=88214,
+        job_id=412,
         institution_name="Demoacademy",
         settings=_settings(tmp_path),
     )
 
-    assert seen["content_name"] == "88214"          # the Suite dialog
+    assert seen["content_name"] == "412"            # the Suite dialog
     assert seen["cover_title"] == "Kickoff and Advanced Prompting"  # the cloud
 
 
-def test_without_an_asset_id_the_material_id_is_used(monkeypatch, tmp_path):
+def test_without_a_job_id_the_material_id_is_used(monkeypatch, tmp_path):
     import worker.cloud_job as job
 
     seen = {}

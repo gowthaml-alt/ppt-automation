@@ -45,9 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--material-name", required=True)
     parser.add_argument("--material-id", required=True)
     parser.add_argument(
-        "--asset-id",
+        "--job-id",
         default="",
-        help="Publish under this id instead of the material id",
+        help="Queue row id; the deck is published under it",
     )
     parser.add_argument("--institution-name", required=True)
     parser.add_argument(
@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             material_id=args.material_id,
             institution_name=args.institution_name,
             settings=settings,
-            asset_id=args.asset_id,
+            job_id=args.job_id,
             content_name=args.content_name,
             keep_files=args.keep_files,
         )

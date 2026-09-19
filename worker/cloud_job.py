@@ -373,17 +373,19 @@ def run_cloud_job(
     material_id: int | str,
     institution_name: str,
     settings: Settings,
-    asset_id: int | str = "",
+    job_id: int | str = "",
     content_name: str = "",
     keep_files: bool = False,
 ) -> CloudJobResult:
     """Download, repair if needed, publish, and return the iframe URL.
 
-    The deck is published under its id, not its name: two materials can share
-    a name, and the browser half then has no way to tell which row is the one
-    just published. The name a person should see is set on the cover instead.
+    The deck is published under the queue row's id, not its name. Two
+    materials can share a name, and the browser half then has no way to tell
+    which row is the one just published; an id is unique, and a queue id is
+    unique per attempt, so even a retry cannot collide with its own earlier
+    run. The name a person should see is set on the cover instead.
     """
-    publish_name = str(content_name or asset_id or material_id).strip()
+    publish_name = str(content_name or job_id or material_id).strip()
     if not url and not pptx:
         raise ValueError("pass either url or pptx")
     started = time.monotonic()
