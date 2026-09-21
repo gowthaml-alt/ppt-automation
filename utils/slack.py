@@ -26,7 +26,7 @@ class SlackNotifier:
             return
         text = (
             f"PPT automation failed\n"
-            f"queue_id={job.queue_id}\n"
+            f"job_id={job.job_id}\n"
             f"material_id={job.material_id}\n"
             f"material_name={job.material_name}\n"
             f"institution_name={job.institution_name or ''}\n"

@@ -135,3 +135,15 @@ def test_a_suite_ribbon_is_ready():
 
     window = _FakeRibbon(["Home", "iSpring Suite 11"])
     assert has_addin_tab(window, timeout_s=0) is True
+
+
+def test_republish_confirms_overwrite_of_the_same_job_id():
+    from publisher.ispring_cloud import is_overwrite_prompt, preferred_overwrite_button
+
+    assert is_overwrite_prompt(
+        "A presentation with this name already exists. Do you want to replace it?"
+    )
+    assert is_overwrite_prompt("Content already exists. Overwrite?")
+    assert not is_overwrite_prompt("Publishing is complete!")
+    assert preferred_overwrite_button(["Cancel", "Yes"]) == "Yes"
+    assert preferred_overwrite_button(["Replace", "No"]) == "Replace"

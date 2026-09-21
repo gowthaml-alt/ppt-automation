@@ -47,16 +47,23 @@ class SilentBackend:
         self,
         job: Job,
         *,
-        status: str,
-        iframe_url: str | None = None,
-        error_message: str | None = None,
+        status,
+        ispringcloud_link=None,
+        iframe_url=None,
+        stage=None,
+        error_code=None,
+        error_message=None,
     ) -> None:
+        link = ispringcloud_link if ispringcloud_link is not None else iframe_url
         self.results.append(
             {
-                "queue_id": job.queue_id,
+                "job_id": job.job_id,
                 "material_id": job.material_id,
                 "status": status,
-                "iframe_url": iframe_url,
+                "ispringcloud_link": link,
+                "iframe_url": link,
+                "stage": stage,
+                "error_code": error_code,
                 "error_message": error_message,
             }
         )
@@ -116,9 +123,9 @@ def run_local_job(
 ) -> LocalRunResult:
     source = Path(pptx).expanduser().resolve()
     job = Job(
-        queue_id=queue_id,
+        job_id=queue_id,
+        file_url=str(source),
         material_id=material_id,
-        ppt_file_url=str(source),
         material_name=material_name,
         institution_name=institution_name,
     )

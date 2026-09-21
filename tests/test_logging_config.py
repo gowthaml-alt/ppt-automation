@@ -46,18 +46,17 @@ def test_scrub_url_removes_userinfo_credentials():
     assert scrub_url("https://user:secret@example.com/a") == "https://example.com/a"
 
 
-def test_job_context_uses_queue_id():
+def test_job_context_uses_job_id():
     clear_job_context()
-    bind_job_context(queue_id=101, material_id=5001)
+    bind_job_context(job_id=101, material_id=5001)
     set_stage("download")
     try:
         record = _record("downloading")
         JobContextFilter().filter(record)
         payload = json.loads(JsonFormatter().format(record))
-        assert payload["queue_id"] == 101
+        assert payload["job_id"] == 101
         assert payload["material_id"] == 5001
         assert payload["stage"] == "download"
-        assert "job_id" not in payload
     finally:
         clear_job_context()
 

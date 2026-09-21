@@ -381,15 +381,15 @@ def run_cloud_job(
 
     The deck is published under the queue row's id, not its name. Two
     materials can share a name, and the browser half then has no way to tell
-    which row is the one just published; an id is unique, and a queue id is
-    unique per attempt, so even a retry cannot collide with its own earlier
-    run. The name a person should see is set on the cover instead.
+    which row is the one just published. job_id is unique per queue row. A
+    later retry of the same row reuses that job_id and overwrites the existing
+    presentation. The name a person should see is set on the cover instead.
     """
     publish_name = str(content_name or job_id or material_id).strip()
     if not url and not pptx:
         raise ValueError("pass either url or pptx")
     started = time.monotonic()
-    workspace = Path(settings.temp_root) / f"cloud-{material_id}"
+    workspace = Path(settings.temp_root) / f"cloud-{publish_name}"
     if workspace.exists():
         shutil.rmtree(workspace, ignore_errors=True)
     workspace.mkdir(parents=True, exist_ok=True)

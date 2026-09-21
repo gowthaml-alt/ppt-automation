@@ -65,6 +65,15 @@ REPAIR_PROMPT_RE = re.compile(
 )
 REPAIR_BUTTONS = ("Repair", "Yes", "OK", "Open", "Continue")
 
+# A retried queue row is published under the same job_id. iSpring then asks
+# whether to replace the existing presentation — that must be Yes, not a
+# second presentation with a new name.
+OVERWRITE_PROMPT_RE = re.compile(
+    r"already exists|overwrite|replace (it|the existing)|update the existing",
+    re.I,
+)
+OVERWRITE_BUTTONS = ("Replace", "Overwrite", "Update", "Yes", "OK")
+
 # --- website selectors ------------------------------------------------------
 POPUP_SELECTORS = (
     '[data-at*="uikit-layer-popup"]',
@@ -757,11 +766,71 @@ def wait_for_completion(window, timeout_s: float) -> None:
         if current and current != last_status:
             last_status = current
             _note("publish progress", operation=current)
+        confirm_overwrite(window)
         time.sleep(2)
     raise ISpringPublishingError(
         f"publish did not finish within {timeout_s}s (last status {last_status!r})",
         user_message="Publishing to iSpring Cloud timed out.",
     )
+
+
+def is_overwrite_prompt(text: str) -> bool:
+    return bool(OVERWRITE_PROMPT_RE.search(normalise(text)))
+
+
+def preferred_overwrite_button(labels: list[str]) -> str | None:
+    indexed = [(normalise(label).lower(), label) for label in labels]
+    for wanted in OVERWRITE_BUTTONS:
+        key = wanted.lower()
+        for normalised, original in indexed:
+            if normalised == key or normalised.startswith(key):
+                return original
+    return None
+
+
+def confirm_overwrite(window) -> bool:
+    """Click through iSpring's 'this name already exists — replace?' dialog.
+
+    Retry jobs reuse job_id as the presentation name. Creating a second
+    presentation would leave the failed copy in place.
+    """
+    try:
+        dialogs = list(window.descendants(control_type="Window"))
+        dialogs.append(window)
+    except Exception:  # noqa: BLE001
+        return False
+    answered = False
+    for dialog in dialogs:
+        try:
+            texts = [normalise(dialog.window_text())]
+            for child in dialog.descendants(control_type="Text")[:20]:
+                texts.append(normalise(child.window_text()))
+        except Exception:  # noqa: BLE001
+            continue
+        haystack = " ".join(part for part in texts if part)
+        if not is_overwrite_prompt(haystack):
+            continue
+        try:
+            labels = [
+                btn.window_text()
+                for btn in dialog.descendants(control_type="Button")
+                if btn.window_text()
+            ]
+        except Exception:  # noqa: BLE001
+            continue
+        wanted = preferred_overwrite_button(labels)
+        if not wanted:
+            continue
+        try:
+            button = dialog.child_window(title=wanted, control_type="Button")
+            if not button.exists():
+                continue
+            button.invoke()
+            _note("overwrote existing presentation", button=wanted)
+            answered = True
+        except Exception:  # noqa: BLE001
+            continue
+    return answered
 
 
 def click_manage_content(window) -> bool:

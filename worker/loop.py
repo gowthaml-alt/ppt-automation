@@ -5,21 +5,30 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from typing import Protocol
 
-from api_client.jobs import BackendClient
+from api_client.jobs import Job
 from config.settings import Settings
 from utils.exceptions import JobFetchError, PptAutomationError
-from worker.pipeline import Pipeline
+from worker import health
 
 logger = logging.getLogger(__name__)
+
+
+class JobProcessor(Protocol):
+    def process(self, job: Job) -> None: ...
+
+
+class NextJobSource(Protocol):
+    def get_next_job(self) -> Job | None: ...
 
 
 class WorkerLoop:
     def __init__(
         self,
         settings: Settings,
-        backend: BackendClient,
-        pipeline: Pipeline,
+        backend: NextJobSource,
+        pipeline: JobProcessor,
         *,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -49,6 +58,9 @@ class WorkerLoop:
                 extra={"stage": "fetch"},
             )
             return
+        if not health.should_take_work(self._settings.log_root):
+            self._sleeper(self._settings.poll_interval_seconds)
+            return
         try:
             job = self._backend.get_next_job()
         except JobFetchError:
@@ -65,7 +77,7 @@ class WorkerLoop:
             logger.info(
                 "processing job",
                 extra={
-                    "queue_id": job.queue_id,
+                    "job_id": job.job_id,
                     "material_id": job.material_id,
                     "stage": "fetch",
                 },
@@ -75,7 +87,7 @@ class WorkerLoop:
             # Failure callback already sent inside the pipeline.
             logger.error(
                 "job ended in failure",
-                extra={"queue_id": job.queue_id, "stage": "unexpected"},
+                extra={"job_id": job.job_id, "stage": "unexpected"},
                 exc_info=True,
             )
         finally:

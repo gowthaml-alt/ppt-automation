@@ -29,7 +29,7 @@ STATE_NAME = "worker-health.json"
 # Two failures can be bad luck. Three in a row is the machine.
 DEFAULT_LIMIT = 3
 # Stages that mean the machine is broken, not the deck.
-MACHINE_STAGES = {"powerpoint_open", "ispring_publish", "worker_health"}
+MACHINE_STAGES = {"powerpoint", "powerpoint_open", "ispring", "ispring_publish", "worker_health"}
 
 
 @dataclass

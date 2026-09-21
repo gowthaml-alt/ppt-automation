@@ -15,10 +15,14 @@ from utils.exceptions import (
 
 
 def make_job(**overrides) -> Job:
+    if "queue_id" in overrides and "job_id" not in overrides:
+        overrides["job_id"] = overrides.pop("queue_id")
+    if "ppt_file_url" in overrides and "file_url" not in overrides:
+        overrides["file_url"] = overrides.pop("ppt_file_url")
     values = {
-        "queue_id": 101,
+        "job_id": 101,
+        "file_url": "https://storage.example.com/input/biology.pptx",
         "material_id": 5001,
-        "ppt_file_url": "https://storage.example.com/input/biology.pptx",
         "material_name": "Introduction to Biology",
         "institution_name": "ABC College",
     }
@@ -37,15 +41,28 @@ class FakeBackend:
             return None
         return self.jobs.pop(0)
 
-    def send_job_result(self, job: Job, *, status: str, iframe_url=None, error_message=None):
+    def send_job_result(
+        self,
+        job: Job,
+        *,
+        status,
+        ispringcloud_link=None,
+        iframe_url=None,
+        stage=None,
+        error_code=None,
+        error_message=None,
+    ):
         if self.fail_callback:
             raise CallbackError("callback down")
         self.results.append(
             {
-                "queue_id": job.queue_id,
+                "job_id": job.job_id,
                 "material_id": job.material_id,
                 "status": status,
-                "iframe_url": iframe_url,
+                "ispringcloud_link": ispringcloud_link,
+                "iframe_url": iframe_url if iframe_url is not None else ispringcloud_link,
+                "stage": stage,
+                "error_code": error_code,
                 "error_message": error_message,
             }
         )
@@ -141,7 +158,7 @@ class FakeSlack:
 
     def notify_failure(self, job: Job, *, stage: str, error_message: str) -> None:
         self.calls.append(
-            {"queue_id": job.queue_id, "stage": stage, "error_message": error_message}
+            {"job_id": job.job_id, "queue_id": job.queue_id, "stage": stage, "error_message": error_message}
         )
 
 

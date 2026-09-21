@@ -21,10 +21,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     backend_base_url: str = ""
-    backend_get_job_path: str = "/api/ppt-jobs/next"
-    backend_callback_path: str = "/api/ppt-jobs/callback"
-    backend_api_key: str = ""
-    backend_api_key_header: str = "X-API-Key"
 
     poll_interval_seconds: int = 30
     get_job_retry_attempts: int = 3
@@ -109,12 +105,6 @@ class Settings(BaseSettings):
         if not self.backend_base_url:
             raise ValueError(
                 "BACKEND_BASE_URL must be set when APP_ENV=production."
-            )
-        if self.storage_backend == "local_fs":
-            raise ValueError(
-                "STORAGE_BACKEND=local_fs is not permitted when APP_ENV=production: "
-                "published output would be written to a directory nothing serves, "
-                "producing an iframe URL that cannot resolve."
             )
         return self
 

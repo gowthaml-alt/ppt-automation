@@ -50,7 +50,7 @@ def _pipeline(tmp_path, **overrides):
 def test_success_sends_completed_callback_and_cleans_up(tmp_path):
     pipeline, deps = _pipeline(tmp_path)
     pipeline.process(make_job())
-    assert deps["backend"].results[0]["status"] == "completed"
+    assert deps["backend"].results[0]["status"] == 2
     assert deps["backend"].results[0]["iframe_url"].endswith("/ppt/5001/index.html")
     assert deps["browser"].checked
     assert deps["powerpoint"].quit_calls >= 1
@@ -64,7 +64,7 @@ def test_publish_uses_the_file_powerpoint_actually_has_open(tmp_path):
     powerpoint = FakePowerPoint(repaired_name="source.repaired.pptx")
     pipeline, deps = _pipeline(tmp_path, powerpoint=powerpoint)
     pipeline.process(make_job())
-    assert deps["backend"].results[0]["status"] == "completed"
+    assert deps["backend"].results[0]["status"] == 2
     assert deps["publisher"].published == [
         str(Path(powerpoint.opened[0]).with_name("source.repaired.pptx"))
     ]
@@ -117,7 +117,7 @@ def test_publish_failure_sends_failed_callback(tmp_path):
     pipeline, deps = _pipeline(tmp_path, publisher=FakePublisher(fail=True))
     with pytest.raises(ISpringPublishingError):
         pipeline.process(make_job())
-    assert deps["backend"].results[0]["status"] == "failed"
+    assert deps["backend"].results[0]["status"] == 3
     assert "iSpring" in deps["backend"].results[0]["error_message"] or deps["slack"].calls
     assert deps["storage"].uploaded == []
     assert deps["slack"].calls[0]["stage"] == "ispring_publish"
@@ -127,7 +127,7 @@ def test_upload_failure_does_not_mark_success(tmp_path):
     pipeline, deps = _pipeline(tmp_path, storage=FakeStorage(fail=True))
     with pytest.raises(OutputUploadError):
         pipeline.process(make_job())
-    assert deps["backend"].results[0]["status"] == "failed"
+    assert deps["backend"].results[0]["status"] == 3
     assert deps["browser"].checked == []
 
 

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from api_client.jobs import Job, UploadResult, record_orphaned_output
+from api_client.jobs import Job, UploadResult, error_code_for, record_orphaned_output, result_stage
 from config.settings import Settings
 from downloader.pptx import download_pptx
 from powerpoint.service import USER_DAMAGED
@@ -53,8 +53,10 @@ class BackendLike(Protocol):
         self,
         job: Job,
         *,
-        status: str,
-        iframe_url: str | None = None,
+        status: int,
+        ispringcloud_link: str | None = None,
+        stage: str | None = None,
+        error_code: str | None = None,
         error_message: str | None = None,
     ) -> None: ...
 
@@ -92,8 +94,8 @@ class Pipeline:
         self._downloader = downloader
 
     def process(self, job: Job) -> None:
-        bind_job_context(queue_id=job.queue_id, material_id=job.material_id)
-        paths = build_job_paths(self._settings.temp_root, job.queue_id)
+        bind_job_context(job_id=job.job_id, material_id=job.material_id)
+        paths = build_job_paths(self._settings.temp_root, job.job_id)
         original_error: BaseException | None = None
         upload_result: UploadResult | None = None
         success = False
@@ -129,7 +131,7 @@ class Pipeline:
             self._browser.check(upload_result.iframe_url)
             set_stage("callback")
             self._backend.send_job_result(
-                job, status="completed", iframe_url=upload_result.iframe_url
+                job, status=2, ispringcloud_link=upload_result.iframe_url
             )
             success = True
         except PptAutomationError as exc:
@@ -199,7 +201,13 @@ class Pipeline:
             message = f"{message} (uploaded iframe_url preserved in orphaned_outputs.jsonl)"
         try:
             self._backend.send_job_result(
-                job, status="failed", error_message=message[:4000]
+                job,
+                status=3,
+                stage=result_stage(str(stage)),
+                error_code=error_code_for(error)
+                if isinstance(error, BaseException)
+                else "UNEXPECTED",
+                error_message=message[:4000],
             )
         except CallbackError:
             logger.error(

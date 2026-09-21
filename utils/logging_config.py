@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from config.settings import Settings
 
+_job_id: ContextVar[int | None] = ContextVar("job_id", default=None)
 _queue_id: ContextVar[int | None] = ContextVar("queue_id", default=None)
 _material_id: ContextVar[int | None] = ContextVar("material_id", default=None)
 _stage: ContextVar[str | None] = ContextVar("stage", default=None)
@@ -21,8 +22,15 @@ _RESERVED = frozenset(
 ) | {"message", "asctime", "taskName"}
 
 
-def bind_job_context(*, queue_id: int, material_id: int) -> None:
-    _queue_id.set(queue_id)
+def bind_job_context(
+    *,
+    job_id: int | None = None,
+    queue_id: int | None = None,
+    material_id: int | None = None,
+) -> None:
+    actual = job_id if job_id is not None else queue_id
+    _job_id.set(actual)
+    _queue_id.set(actual)
     _material_id.set(material_id)
 
 
@@ -31,6 +39,7 @@ def set_stage(stage: str) -> None:
 
 
 def clear_job_context() -> None:
+    _job_id.set(None)
     _queue_id.set(None)
     _material_id.set(None)
     _stage.set(None)
@@ -53,6 +62,7 @@ def scrub_url(url: str) -> str:
 class JobContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         for attr, var in (
+            ("job_id", _job_id),
             ("queue_id", _queue_id),
             ("material_id", _material_id),
             ("stage", _stage),
