@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -29,8 +32,12 @@ class Settings(BaseSettings):
     get_job_retry_attempts: int = 3
     callback_retry_attempts: int = 3
 
-    temp_root: str = "D:\\ppt-automation\\jobs"
-    log_root: str = "D:\\ppt-automation\\logs"
+    # Under the repo, not D:. A drive letter in a default is a guess about
+    # somebody else's machine, and when it is wrong nothing says so — the
+    # worker takes jobs and fails every one of them on a path nobody set.
+    # Set TEMP_ROOT and LOG_ROOT in .env for a real deployment.
+    temp_root: str = str(REPO_ROOT / "jobs")
+    log_root: str = str(REPO_ROOT / "logs")
     keep_failed_job_files: bool = False
     min_free_disk_gb: int = 10
 
