@@ -50,10 +50,18 @@ class CloudPipeline:
                 content_name="",
             )
             set_stage("callback")
+            # The whole <iframe ...></iframe>, not the src inside it.
+            #
+            # The frontend renders ispring_cloud_link as content, not as an
+            # iframe's src: PreviewMaterial.tsx passes it straight into
+            # MathJaxComponent as children. A bare URL there shows as text,
+            # or opens the player page on its own instead of embedding it.
+            # The old manual console pasted the embed code, so this matches
+            # what is already in the column for every material done by hand.
             self._backend.send_job_result(
                 job,
                 status=2,
-                ispringcloud_link=result.iframe_url,
+                ispringcloud_link=result.embed_code or result.iframe_url,
             )
             health.record_success(self._settings.log_root)
         except PptAutomationError as exc:

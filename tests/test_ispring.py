@@ -181,3 +181,47 @@ def test_a_flat_tree_keeps_its_matches():
 
 def test_nothing_found_stays_nothing():
     assert _choose([]) == []
+
+
+# --- the embed has to fill its box, not sit at 1280x720 --------------------
+
+
+def _fill(embed):
+    from publisher.ispring_cloud import fill_container
+
+    return fill_container(embed)
+
+
+def test_fixed_size_becomes_full_size():
+    """What iSpring actually hands back."""
+    out = _fill(
+        '<iframe src="https://harshit.ispring.com/app/embed-player/abc" '
+        'width="1280" height="720" frameborder="0" allowfullscreen></iframe>'
+    )
+    assert 'width="100%"' in out
+    assert 'height="100%"' in out
+    assert "1280" not in out and "720" not in out
+    # everything else survives
+    assert 'src="https://harshit.ispring.com/app/embed-player/abc"' in out
+    assert "allowfullscreen" in out
+    assert 'frameborder="0"' in out
+
+
+def test_sizes_are_added_when_ispring_leaves_them_out():
+    out = _fill('<iframe src="https://x/y" allowfullscreen></iframe>')
+    assert 'width="100%"' in out and 'height="100%"' in out
+
+
+def test_unquoted_sizes_are_replaced_too():
+    out = _fill("<iframe src=https://x/y width=1280 height=720></iframe>")
+    assert 'width="100%"' in out and 'height="100%"' in out
+    assert "1280" not in out
+
+
+def test_only_the_iframe_is_touched():
+    """A width on something else in the snippet is none of our business."""
+    out = _fill(
+        '<div width="500"><iframe src="https://x/y" width="1280"></iframe></div>'
+    )
+    assert '<div width="500">' in out
+    assert 'width="100%"' in out

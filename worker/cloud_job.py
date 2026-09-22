@@ -48,6 +48,10 @@ from utils.validators import (
 
 logger = logging.getLogger(__name__)
 
+# PowerPoint holds its files for a moment after quitting; reopening straight
+# away gets a half-dead process rather than a new one.
+POWERPOINT_RESTART_WAIT_S = 5
+
 CHUNK_SIZE = 64 * 1024
 OOXML_MAGIC = b"PK\x03\x04"  # .pptx and friends
 OLE_MAGIC = b"\xd0\xcf\x11\xe0"  # the old binary .ppt
@@ -419,9 +423,9 @@ def run_cloud_job(
         service, in_use, prompts = open_with_repair(deck, settings)
         repaired = damaged or in_use != deck or prompts > 0
 
-        def publish_once() -> CloudPublishResult:
+        def publish_once(deck_in_use) -> CloudPublishResult:
             return publish_to_cloud(
-                in_use,
+                deck_in_use,
                 institution=institution_name,
                 content_name=publish_name,
                 cover_title=material_name,
@@ -436,7 +440,7 @@ def run_cloud_job(
             )
 
         try:
-            result: CloudPublishResult = publish_once()
+            result: CloudPublishResult = publish_once(in_use)
         except ProjectMissingError:
             # A new institution: nobody has made it a folder yet. Make one and
             # publish again. Once only — if the folder is still not in the
@@ -458,7 +462,28 @@ def run_cloud_job(
                 chrome_path=settings.ispring_chrome_path,
                 cloud_url=settings.ispring_cloud_url,
             )
-            result = publish_once()
+
+            # PowerPoint has to be restarted before it can see the folder.
+            #
+            # The Suite add-in reads the cloud tree once, when it first talks
+            # to iSpring, and keeps it for the life of the process. A folder
+            # created a minute ago is simply not in the picker it is holding,
+            # so publishing again in the same PowerPoint fails exactly the
+            # same way. Quitting and reopening is what makes it look again.
+            logger.info(
+                "restarting PowerPoint so it can see the new folder",
+                extra={"stage": "ispring_publish", "institution": institution_name},
+            )
+            try:
+                service.quit()
+            except Exception:  # noqa: BLE001
+                logger.warning("PowerPoint did not close cleanly", exc_info=True)
+            service = None
+            time.sleep(POWERPOINT_RESTART_WAIT_S)
+
+            service, in_use, prompts = open_with_repair(deck, settings)
+            repaired = repaired or in_use != deck or prompts > 0
+            result = publish_once(in_use)
         published = True
     finally:
         # PowerPoint has to let go of the file before it can be deleted.

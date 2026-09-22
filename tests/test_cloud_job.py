@@ -270,13 +270,24 @@ def test_a_missing_folder_is_created_and_the_deck_published(monkeypatch, tmp_pat
             raise ProjectMissingError("no folder", institution="Brand New College")
         return type("R", (), {"iframe_url": "u", "embed_code": "e", "elapsed_s": 1})()
 
+    opens = []
+
+    class _Service:
+        def quit(self):
+            opens.append("quit")
+
+    def _open(deck, _s):
+        opens.append("open")
+        return _Service(), deck, 0
+
     monkeypatch.setattr(job, "publish_to_cloud", _publish)
     monkeypatch.setattr(
         job, "ensure_project_folder",
         lambda institution, parent, cdp, **kw: created.append((institution, parent)),
     )
     monkeypatch.setattr(job, "inspect", lambda _p: False)
-    monkeypatch.setattr(job, "open_with_repair", lambda deck, _s: (None, deck, 0))
+    monkeypatch.setattr(job, "open_with_repair", _open)
+    monkeypatch.setattr(job, "POWERPOINT_RESTART_WAIT_S", 0)
 
     source = tmp_path / "deck.pptx"
     source.write_bytes(minimal_pptx_bytes())
@@ -293,6 +304,10 @@ def test_a_missing_folder_is_created_and_the_deck_published(monkeypatch, tmp_pat
     assert len(attempts) == 2
     assert created == [("Brand New College", "PPT migration New")]
     assert result.iframe_url == "u"
+    # The Suite keeps the cloud tree for the life of the process, so the
+    # second attempt has to be a new PowerPoint or it cannot see the folder.
+    # The last quit is the job tearing down as it always does.
+    assert opens == ["open", "quit", "open", "quit"]
 
 
 def test_the_folder_is_created_once_not_in_a_loop(monkeypatch, tmp_path):

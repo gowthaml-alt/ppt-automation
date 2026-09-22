@@ -116,6 +116,15 @@ EMBED_TEMPLATE = (
     'style="border: none;"></iframe>'
 )
 SRC_RE = re.compile(r"""\bsrc\s*=\s*["']([^"']+)["']""", re.I)
+
+# iSpring hands back a fixed-size iframe — width="1280" height="720". Inside
+# the player that is a deck sitting in the corner of whatever box holds it,
+# with the rest of the space empty and no way to fill it. The embed has to
+# stretch instead, so the sizes are rewritten to 100% before it is stored.
+IFRAME_OPEN_RE = re.compile(r"<iframe\b[^>]*>", re.I)
+SIZE_ATTR_RE = re.compile(
+    r"""\s(?:width|height)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.I
+)
 MENU_BUTTON_RE = re.compile(r"more|menu|action|option|\.\.\.|…", re.I)
 SHARE_RE = re.compile(r"^\s*share\b", re.I)
 EMBED_RE = re.compile(r"embed", re.I)
@@ -2770,12 +2779,47 @@ def ensure_project_folder(
                 ),
             )
 
-        page.goto(
-            f"{cloud_url.rstrip('/')}/app/s?s=project%2F{target.get('id')}%2F{root}",
-            wait_until="domcontentloaded",
-            timeout=60000,
-        )
-        page.wait_for_timeout(4000)
+        # Get into the project, and prove we are in it before touching Add.
+        #
+        # The library is a single-page app: goto loads the shell and the app
+        # then routes itself, so for a second or two the screen still shows
+        # whatever it showed before — usually the Learning Content root. The
+        # Add button there belongs to that view, and clicking it creates the
+        # folder at the top of the library instead of inside the parent.
+        # Nothing in the page says which view you are on; the address does.
+        project_id = str(target.get("id") or "")
+        target_url = f"{cloud_url.rstrip('/')}/app/s?s=project%2F{project_id}%2F{root}"
+        landed = False
+        for attempt in range(1, 4):
+            try:
+                page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as exc:  # noqa: BLE001
+                _warn("could not open the project page", attempt=attempt, error=str(exc))
+                continue
+            for _ in range(15):
+                page.wait_for_timeout(1000)
+                here = (page.evaluate("() => location.href") or "").lower()
+                if project_id.lower() in here and root.lower() in here:
+                    landed = True
+                    break
+            if landed:
+                break
+            _warn("the library did not stay on the project page", attempt=attempt)
+
+        if not landed:
+            raise ISpringPublishingError(
+                f"could not open {parent!r} ({target_url}); refusing to create a "
+                "folder while the library is showing something else",
+                user_message=(
+                    f"Could not open the {parent!r} folder in iSpring Cloud, so "
+                    f"no folder was created for {wanted!r}."
+                ),
+            )
+
+        # The Add button has to belong to the project view, not a half-drawn
+        # previous one.
+        page.wait_for_selector(ADD_BUTTON, timeout=30000)
+        page.wait_for_timeout(1500)
 
         page.click(ADD_BUTTON, timeout=20000)
         page.click(ADD_FOLDER_ITEM, timeout=20000)
@@ -2798,13 +2842,31 @@ def ensure_project_folder(
         after = folder_titles(page, root)
         if not any(title.lower() == wanted.lower() for title in after):
             raise ISpringPublishingError(
-                f"created a folder but {wanted!r} is not in {parent!r} afterwards",
+                f"a folder was created but {wanted!r} is not in {parent!r} "
+                "afterwards — check the top of the library, it may be sitting "
+                "there and will need deleting",
                 user_message=(
-                    f"Could not create the iSpring Cloud folder for {wanted!r}."
+                    f"Could not create the iSpring Cloud folder for {wanted!r} "
+                    f"inside {parent!r}. Check the library for a stray folder."
                 ),
             )
         _note("created the institution folder", institution=wanted, parent=parent)
         return True
+
+
+def fill_container(embed: str) -> str:
+    """Make the iframe fill whatever holds it, instead of 1280x720.
+
+    Only the opening tag is touched, and only its width and height: every
+    other attribute iSpring puts there — allowfullscreen, the frameborder,
+    the src — is left exactly as it came.
+    """
+
+    def rewrite(match: "re.Match[str]") -> str:
+        tag = SIZE_ATTR_RE.sub("", match.group(0))
+        return tag.replace("<iframe", '<iframe width="100%" height="100%"', 1)
+
+    return IFRAME_OPEN_RE.sub(rewrite, embed, count=1)
 
 
 def fetch_embed(
@@ -3035,6 +3097,7 @@ def publish_to_cloud(
             except Exception:  # noqa: BLE001
                 _warn("could not close PowerPoint", exc_info=True)
 
+    embed = fill_container(embed)
     match = SRC_RE.search(embed)
     if not match:
         raise ISpringPublishingError(

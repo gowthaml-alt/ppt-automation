@@ -14,6 +14,13 @@ class RecordingBackend:
         self.results.append({"job_id": job.job_id, **kwargs})
 
 
+# What iSpring's share popup actually hands over.
+EMBED_CODE = (
+    '<iframe src="https://harshit.ispring.com/app/embed-player/abc" '
+    'width="1280" height="720" frameborder="0" allowfullscreen></iframe>'
+)
+
+
 class FakeCloudJob:
     def __init__(self, fail=None, iframe_url="https://harshit.ispring.com/app/embed-player/abc"):
         self.fail = fail
@@ -29,7 +36,7 @@ class FakeCloudJob:
             (),
             {
                 "iframe_url": self.iframe_url,
-                "embed_code": "<iframe></iframe>",
+                "embed_code": EMBED_CODE,
                 "content_name": str(kwargs.get("job_id")),
                 "source_name": "source.pptx",
                 "repaired": False,
@@ -49,7 +56,12 @@ def _settings(tmp_path, **overrides) -> Settings:
     return Settings(**values)
 
 
-def test_success_posts_status_2_with_ispringcloud_link(tmp_path):
+def test_success_posts_status_2_with_the_whole_iframe(tmp_path):
+    """The column holds the embed code, not the URL inside it.
+
+    PreviewMaterial.tsx renders ispring_cloud_link as content, so a bare URL
+    shows up as text on the page instead of the deck.
+    """
     backend = RecordingBackend()
     cloud = FakeCloudJob()
     pipeline = CloudPipeline(_settings(tmp_path), backend, cloud_job=cloud)
@@ -58,7 +70,7 @@ def test_success_posts_status_2_with_ispringcloud_link(tmp_path):
         {
             "job_id": 123,
             "status": 2,
-            "ispringcloud_link": "https://harshit.ispring.com/app/embed-player/abc",
+            "ispringcloud_link": EMBED_CODE,
         }
     ]
     assert not backend.retry_calls
