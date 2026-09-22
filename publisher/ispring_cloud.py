@@ -300,15 +300,79 @@ def open_presentation(pptx: Path):
     return app
 
 
-def find_powerpoint_window():
+def find_powerpoint_window(deck: Path | str | None = None):
+    """The PowerPoint window holding the deck.
+
+    PowerPoint keeps more than one PPTFrameClass window around: a hidden
+    frame it uses for automation, the start screen, and one per deck already
+    open. Asking for the class alone raises "There are 2 elements that match"
+    the moment a second one exists, which is most of the time on a machine
+    somebody also works on.
+
+    So every candidate is scored — visible first, then titled, then matching
+    the deck's file name, then the largest — and the winner is looked up
+    again by handle, which is unique. Passing ``deck`` is what makes the
+    choice right rather than merely deterministic when several decks are
+    open.
+    """
     ensure_com()
     from pywinauto import Application  # type: ignore
 
     app = Application(backend="uia").connect(path="POWERPNT.EXE", timeout=30)
-    window = app.window(class_name="PPTFrameClass")
-    window.wait("exists", timeout=30)
-    _note("found PowerPoint", title=window.window_text())
-    return window
+    wanted = Path(deck).stem.lower() if deck else ""
+
+    def score(win):
+        try:
+            title = normalise(win.window_text())
+            rect = win.rectangle()
+            area = max(0, rect.width()) * max(0, rect.height())
+            visible = bool(win.is_visible())
+        except Exception:  # noqa: BLE001
+            return None
+        return (
+            1 if visible else 0,
+            1 if title else 0,
+            1 if wanted and wanted in title.lower() else 0,
+            area,
+        ), title
+
+    best = None
+    best_score = None
+    best_title = ""
+    seen = 0
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            windows = app.windows(
+                class_name="PPTFrameClass",
+                top_level_only=True,
+                visible_only=False,
+                enabled_only=False,
+            )
+        except Exception:  # noqa: BLE001
+            windows = []
+        seen = len(windows)
+        for win in windows:
+            scored = score(win)
+            if scored is None:
+                continue
+            value, title = scored
+            if best_score is None or value > best_score:
+                best, best_score, best_title = win, value, title
+        # A visible window with a title is a real frame; anything less is
+        # PowerPoint still starting up, so give it another second.
+        if best_score is not None and best_score[0] and best_score[1]:
+            break
+        time.sleep(1)
+
+    if best is None:
+        raise ISpringPublishingError(
+            "no PowerPoint window found",
+            user_message=USER_PUBLISH_FAILED,
+        )
+
+    _note("found PowerPoint", title=best_title, windows=seen)
+    return app.window(handle=best.handle)
 
 
 def dismiss_nuisance_dialogs(window) -> None:
@@ -2900,7 +2964,7 @@ def publish_to_cloud(
     try:
         if not skip_open:
             app = open_presentation(pptx)
-        window = find_powerpoint_window()
+        window = find_powerpoint_window(pptx)
         # The picker is clicked with a real mouse click, which lands wherever
         # the front window is. The folder-creation step puts Chrome in front,
         # so on the retry PowerPoint has to be brought back first.
