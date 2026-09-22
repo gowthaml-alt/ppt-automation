@@ -1407,7 +1407,7 @@ def row_titles(page, limit: int = 20) -> list[str]:
     return titles
 
 
-ROW_SCAN_JS = """
+ROW_SCAN_JS = r"""
 () => [...document.querySelectorAll('tr[data-at*="id=row-"]')].map((row, index) => ({
   index,
   id: (row.getAttribute('data-at') || '').replace(/^.*id=row-/, ''),

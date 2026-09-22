@@ -157,11 +157,18 @@ def configure_logging(settings: Settings) -> None:
         file_handler.setFormatter(formatter)
         file_handler.addFilter(context_filter)
         root.addHandler(file_handler)
-    except OSError:
+    except OSError as exc:
+        # No traceback: the path is the whole story, and a wall of it at
+        # startup buries the lines somebody is actually waiting for.
         logging.getLogger(__name__).warning(
-            "could not open log file, continuing with console logging only",
-            extra={"log_root": str(log_root)},
-            exc_info=True,
+            f"cannot write logs to {log_root} ({exc.strerror or exc}); "
+            "console only. Set LOG_ROOT in .env to a folder that exists.",
         )
+
+    # httpx logs "HTTP Request: GET <full url>" at INFO, and our URLs carry
+    # ?token=. That would write the queue password into every log file and
+    # every terminal. Its warnings still come through.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     root._ppt_automation_configured = True  # type: ignore[attr-defined]
