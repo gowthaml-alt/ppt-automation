@@ -91,6 +91,35 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class ConsoleFormatter(logging.Formatter):
+    """One readable line per event, for somebody watching a test run.
+
+    The file handler keeps JSON. This is only about the terminal, where a
+    wall of JSON hides the one line you are waiting for.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        when = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
+            "%H:%M:%S"
+        )
+        bits = []
+        for key in ("stage", "job_id", "material_id"):
+            value = getattr(record, key, None)
+            if value is not None:
+                bits.append(f"{key}={value}")
+        for key in ("url", "status", "attempt", "institution", "parent"):
+            value = getattr(record, key, None)
+            if value is not None:
+                bits.append(f"{key}={value}")
+        context = " ".join(bits)
+        line = f"{when} {record.levelname:<7} {record.getMessage()}"
+        if context:
+            line += f"  [{context}]"
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
+
+
 def job_log_handler(log_dir: Path) -> logging.Handler:
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(log_dir / "job.log", encoding="utf-8")
@@ -110,7 +139,9 @@ def configure_logging(settings: Settings) -> None:
     context_filter = JobContextFilter()
 
     console = logging.StreamHandler()
-    console.setFormatter(formatter)
+    console.setFormatter(
+        ConsoleFormatter() if settings.log_console_format == "text" else formatter
+    )
     console.addFilter(context_filter)
     root.addHandler(console)
 

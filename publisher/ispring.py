@@ -109,7 +109,7 @@ class CloudPublisher:
             Path(pptx),
             institution=institution,
             content_name=content_name,
-            parent_folder=self._settings.ispring_parent_folder,
+            parent_folders=self._settings.ispring_parent_folders,
             cdp_url=self._settings.ispring_chrome_cdp_url,
             publish_timeout_s=self._settings.ispring_publish_timeout_seconds,
             browser_profile_dir=self._settings.ispring_chrome_profile_dir,

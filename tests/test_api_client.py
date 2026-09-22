@@ -294,3 +294,25 @@ def test_orphaned_output_is_appended(tmp_path):
     row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
     assert row["job_id"] == 123
     assert row["iframe_url"].endswith("index.html")
+
+
+# The envelope PHP actually sends: Resource::createJson() returns
+# {"code": 200, "message": "Success", "material": {...}} - an integer code,
+# and the node merged into the top level rather than wrapped in "data".
+PHP_ENVELOPE = {"code": 200, "message": "Success", "material": MATERIAL}
+
+
+def test_parse_next_reads_the_php_envelope():
+    job = parse_next_response(PHP_ENVELOPE)
+    assert job is not None
+    assert job.job_id == 123
+    assert job.material_name == "Week 1 deck"
+
+
+def test_parse_next_empty_queue_in_the_php_envelope():
+    assert parse_next_response({"code": 200, "message": "Success", "material": None}) is None
+
+
+def test_parse_next_still_rejects_a_failure_from_php():
+    with pytest.raises(JobFetchError):
+        parse_next_response({"code": 2001, "message": "Not found"})

@@ -251,3 +251,76 @@ def test_without_a_job_id_the_material_id_is_used(monkeypatch, tmp_path):
         settings=_settings(tmp_path),
     )
     assert seen["content_name"] == "20242897"
+
+
+# --- an institution with no folder yet -------------------------------------
+
+
+def test_a_missing_folder_is_created_and_the_deck_published(monkeypatch, tmp_path):
+    """First publish finds no folder, one is made, the second publish works."""
+    import worker.cloud_job as job
+    from utils.exceptions import ProjectMissingError
+
+    attempts = []
+    created = []
+
+    def _publish(pptx, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise ProjectMissingError("no folder", institution="Brand New College")
+        return type("R", (), {"iframe_url": "u", "embed_code": "e", "elapsed_s": 1})()
+
+    monkeypatch.setattr(job, "publish_to_cloud", _publish)
+    monkeypatch.setattr(
+        job, "ensure_project_folder",
+        lambda institution, parent, cdp, **kw: created.append((institution, parent)),
+    )
+    monkeypatch.setattr(job, "inspect", lambda _p: False)
+    monkeypatch.setattr(job, "open_with_repair", lambda deck, _s: (None, deck, 0))
+
+    source = tmp_path / "deck.pptx"
+    source.write_bytes(minimal_pptx_bytes())
+
+    result = job.run_cloud_job(
+        pptx=str(source),
+        material_name="Induction",
+        material_id=1,
+        job_id=77,
+        institution_name="Brand New College",
+        settings=_settings(tmp_path),
+    )
+
+    assert len(attempts) == 2
+    assert created == [("Brand New College", "PPT migration New")]
+    assert result.iframe_url == "u"
+
+
+def test_the_folder_is_created_once_not_in_a_loop(monkeypatch, tmp_path):
+    """Still missing after creating it: give up rather than go round again."""
+    import worker.cloud_job as job
+    from utils.exceptions import ProjectMissingError
+
+    attempts = []
+
+    def _publish(pptx, **kwargs):
+        attempts.append(kwargs)
+        raise ProjectMissingError("no folder", institution="Brand New College")
+
+    monkeypatch.setattr(job, "publish_to_cloud", _publish)
+    monkeypatch.setattr(job, "ensure_project_folder", lambda *a, **k: True)
+    monkeypatch.setattr(job, "inspect", lambda _p: False)
+    monkeypatch.setattr(job, "open_with_repair", lambda deck, _s: (None, deck, 0))
+
+    source = tmp_path / "deck.pptx"
+    source.write_bytes(minimal_pptx_bytes())
+
+    with pytest.raises(ProjectMissingError):
+        job.run_cloud_job(
+            pptx=str(source),
+            material_name="Induction",
+            material_id=1,
+            job_id=78,
+            institution_name="Brand New College",
+            settings=_settings(tmp_path),
+        )
+    assert len(attempts) == 2

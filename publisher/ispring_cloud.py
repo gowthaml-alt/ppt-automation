@@ -26,9 +26,10 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 from urllib.parse import quote
 
-from utils.exceptions import ISpringPublishingError
+from utils.exceptions import ISpringPublishingError, ProjectMissingError
 
 logger = logging.getLogger(__name__)
 
@@ -670,9 +671,23 @@ def expand_branch(picker, label: str) -> bool:
                 scroll_into_view(control, picker)
             except ISpringPublishingError:
                 continue
+        # Ask the tree to expand. A double-click toggles, so on a branch that
+        # is already open it would close it and hide the very rows being
+        # looked for — which used not to matter when this ran only as a last
+        # resort, and does now that both parents are opened every time.
+        try:
+            expander = control.iface_expand_collapse
+            if expander.CurrentExpandCollapseState == 1:  # already expanded
+                return True
+            expander.Expand()
+            _note("expanded project branch", branch=label)
+            time.sleep(2)
+            return True
+        except Exception:  # noqa: BLE001
+            pass
         try:
             control.double_click_input()
-            _note("expanded project branch", branch=label)
+            _note("expanded project branch", branch=label, how="double click")
             time.sleep(2)
             return True
         except Exception:  # noqa: BLE001
@@ -680,7 +695,86 @@ def expand_branch(picker, label: str) -> bool:
     return False
 
 
-def pick_project(dialog, institution: str, parent_folder: str) -> None:
+def ancestor_label(control, labels: Sequence[str], max_up: int = 8) -> str:
+    """Which of ``labels`` this row sits under, or "" when none of them does."""
+    wanted = {normalise(label).lower(): label for label in labels if label}
+    node = control
+    for _ in range(max_up):
+        try:
+            node = node.parent()
+        except Exception:  # noqa: BLE001
+            return ""
+        if node is None:
+            return ""
+        try:
+            text = normalise(node.window_text()).lower()
+        except Exception:  # noqa: BLE001
+            continue
+        if text in wanted:
+            return wanted[text]
+    return ""
+
+
+def dismiss_window(win, what: str) -> None:
+    """Close a dialog so the next attempt starts from a clean screen."""
+    try:
+        win.close()
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        win.child_window(title="Cancel", control_type="Button").invoke()
+    except Exception:  # noqa: BLE001
+        _warn("could not close a dialog", window=what)
+
+
+def choose_match(placed: Sequence[tuple], parents: Sequence[str], institution: str) -> list:
+    """Narrow rows that share the institution's name down to the one to click.
+
+    ``placed`` pairs each row with the parent it sits under, "" when none.
+    The first parent listed wins a clash, so the same institution always
+    lands in the same folder rather than wherever the tree happened to
+    yield it first.
+    """
+    if not placed or not parents:
+        return [control for _, control in placed]
+
+    under = [(parent, control) for parent, control in placed if parent]
+    if not under:
+        # No row reports one of the parents as an ancestor. That is a flat
+        # tree, not a wrong folder: keep the matches rather than throw away a
+        # folder that is really there.
+        _warn(
+            "could not tell which parent the folder sits under",
+            institution=institution,
+        )
+        return [control for _, control in placed]
+
+    seen = sorted({parent for parent, _ in under})
+    if len(seen) > 1:
+        _warn(
+            "this institution has a folder under both parents",
+            institution=institution,
+            parents=seen,
+            using=parents[0],
+        )
+    order = {parent: index for index, parent in enumerate(parents)}
+    under.sort(key=lambda pair: order[pair[0]])
+    return [under[0][1]]
+
+
+def pick_project(dialog, institution: str, parent_folders: Sequence[str]) -> None:
+    """Select the institution's folder, looking only under ``parent_folders``.
+
+    Scoped on purpose. Four institution names exist under both parents, and a
+    search of the whole tree took whichever row the tree yielded first, which
+    is not a choice anyone made. Here the first parent in the list wins and
+    the clash is logged.
+
+    A missing folder raises ProjectMissingError rather than the general
+    publishing error: the caller creates the folder and tries again.
+    """
+    parents = [folder for folder in parent_folders if folder]
     browse = dialog.child_window(auto_id=ID_BROWSE, control_type="Button")
     if not browse.exists():
         raise ISpringPublishingError(
@@ -696,17 +790,27 @@ def pick_project(dialog, institution: str, parent_folder: str) -> None:
     )
     picker.wait("exists visible", timeout=60)
 
-    matches = find_named(picker, institution)
-    if not matches and parent_folder:
-        expand_branch(picker, parent_folder)
-        matches = find_named(picker, institution)
+    # A collapsed branch has no rows under it to find.
+    for parent in parents:
+        expand_branch(picker, parent)
+
+    matches = choose_match(
+        [(ancestor_label(control, parents), control)
+         for control in find_named(picker, institution)],
+        parents,
+        institution,
+    )
+
     if not matches:
         near = find_named(picker, institution, exact=False)
         hint = ", ".join(normalise(c.window_text()) for c in near[:5]) or "nothing similar"
-        raise ISpringPublishingError(
-            f"project {institution!r} is not in the tree (closest: {hint})",
+        dismiss_window(picker, "the project picker")
+        dismiss_window(dialog, "the publish dialog")
+        raise ProjectMissingError(
+            f"{institution!r} has no folder under {parents} (closest: {hint})",
+            institution=institution,
             user_message=(
-                f"No iSpring Cloud project named {institution!r} was found."
+                f"No iSpring Cloud folder named {institution!r} was found."
             ),
         )
 
@@ -2443,6 +2547,202 @@ def set_cover_title(page, title: str) -> bool:
     return True
 
 
+# --- creating a folder for an institution that has none ---------------------
+#
+# Read from the site's own APIs, write through its UI. The create request's
+# body is not documented anywhere we can see, and a private API guessed at is
+# the kind of thing that fails quietly six months from now; the two GETs below
+# are only lookups, so a change there fails loudly instead.
+
+PROJECT_LIST_API = "/s/api/v1/project/list"
+FOLDER_LIST_API = "/s/api/v1/content/list/project?folderID="
+ADD_BUTTON = '[data-at="id=add-material-button"]'
+ADD_FOLDER_ITEM = '[data-at="id=add-material-folder"]'
+CREATE_FOLDER_POPUP = '[data-at="id=create-folder-popup"]'
+FOLDER_NAME_INPUT = '[data-at="id=folder-name-input"]'
+CREATE_FOLDER_CONFIRM = '[data-at="id=create-folder-button"]'
+
+
+def _cloud_json(page, path: str):
+    """Call one of the library's own endpoints from the signed-in page.
+
+    A signed-out browser answers 401 here rather than anything useful, so the
+    failure is named: that is the one a person can actually fix.
+    """
+    try:
+        return _cloud_fetch(page, path)
+    except Exception as exc:  # noqa: BLE001
+        raise ISpringPublishingError(
+            f"could not read {path} from iSpring Cloud: {exc}",
+            user_message=(
+                "Could not read the iSpring Cloud library. The browser it uses "
+                "may have been signed out; sign in once in that Chrome window."
+            ),
+        ) from exc
+
+
+def _cloud_fetch(page, path: str):
+    return page.evaluate(
+        """async (path) => {
+            const response = await fetch(path, {credentials: 'include'});
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return await response.json();
+        }""",
+        path,
+    )
+
+
+def folder_titles(page, root_folder: str) -> list:
+    listing = _cloud_json(page, FOLDER_LIST_API + root_folder)
+    return [
+        normalise(item.get("title", ""))
+        for item in (listing.get("content") or [])
+        if item.get("type") == "FOLDER"
+    ]
+
+
+def ensure_project_folder(
+    institution: str,
+    parent_folder: str,
+    cdp_url: str,
+    profile_dir: str = r"C:\ispring-chrome-profile",
+    chrome_path: str = "",
+    cloud_url: str = "https://harshit.ispring.com/",
+) -> bool:
+    """Create the institution's folder under ``parent_folder``, if it is missing.
+
+    Returns True when a folder was created, False when one was already there.
+
+    Done in the browser because the Suite publish dialog has no way to make a
+    folder. The name box opens filled in with "New Folder", so it is cleared
+    and typed into, and the result is read back from the library afterwards:
+    a folder created under the wrong name is worse than none at all, and that
+    is exactly what a half-registered keystroke produces.
+    """
+    from playwright.sync_api import sync_playwright
+
+    wanted = normalise(institution)
+    parent = normalise(parent_folder)
+    if not wanted or not parent:
+        raise ISpringPublishingError(
+            "ensure_project_folder needs both an institution and a parent folder",
+            user_message=USER_PUBLISH_FAILED,
+        )
+
+    if not debug_port_open(cdp_url):
+        _note("no browser on the debug port; starting one")
+        start_browser(cdp_url, profile_dir, chrome_path)
+
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.connect_over_cdp(cdp_url)
+        except Exception as exc:  # noqa: BLE001
+            raise ISpringPublishingError(
+                f"could not attach to Chrome at {cdp_url}: {exc}",
+                user_message=(
+                    "The browser this step uses is not running. Start it with "
+                    "scripts\\start_ispring_chrome.cmd, sign in to iSpring "
+                    "Cloud once, and leave it open."
+                ),
+            ) from exc
+        if not browser.contexts:
+            raise ISpringPublishingError(
+                "attached to Chrome but it has no windows open",
+                user_message=USER_PUBLISH_FAILED,
+            )
+        context = browser.contexts[0]
+        page = context.pages[-1] if context.pages else context.new_page()
+        page.bring_to_front()
+
+        try:
+            page.goto(cloud_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as exc:  # noqa: BLE001
+            raise ISpringPublishingError(
+                f"could not open {cloud_url}: {exc}",
+                user_message=USER_PUBLISH_FAILED,
+            ) from exc
+        page.wait_for_timeout(4000)
+
+        # {"projects": [...], "totalProjectsCount": n} — not a bare list.
+        listing = _cloud_json(page, PROJECT_LIST_API)
+        projects = listing.get("projects") if isinstance(listing, dict) else listing
+        target = None
+        for project in projects or []:
+            if normalise(project.get("title", "")).lower() == parent.lower():
+                target = project
+                break
+        if target is None:
+            raise ISpringPublishingError(
+                f"no project named {parent!r} in iSpring Cloud",
+                user_message=(
+                    f"The parent folder {parent!r} was not found in iSpring "
+                    "Cloud. Check ISPRING_NEW_INSTITUTION_PARENT."
+                ),
+            )
+
+        root = str(target.get("rootFolder") or "")
+        existing = folder_titles(page, root)
+        if any(title.lower() == wanted.lower() for title in existing):
+            _note("the folder already exists", institution=wanted, parent=parent)
+            return False
+
+        # "Esromagica" next to "Esro Magica", "LawSikho" next to "Law Sikho":
+        # seven pairs like that are already in the library. Creating an eighth
+        # splits one institution's decks across two folders and nobody notices
+        # for months, so this stops and says which folder it means.
+        squashed = wanted.lower().replace(" ", "")
+        near = [
+            title for title in existing
+            if title.lower().replace(" ", "") == squashed
+        ]
+        if near:
+            raise ISpringPublishingError(
+                f"{parent!r} already holds {near[0]!r}, which is {wanted!r} "
+                "without the spaces",
+                user_message=(
+                    f"A folder called {near[0]!r} already exists in {parent!r}. "
+                    f"Rename it to {wanted!r}, or fix the institution name, "
+                    "rather than having both."
+                ),
+            )
+
+        page.goto(
+            f"{cloud_url.rstrip('/')}/app/s?s=project%2F{target.get('id')}%2F{root}",
+            wait_until="domcontentloaded",
+            timeout=60000,
+        )
+        page.wait_for_timeout(4000)
+
+        page.click(ADD_BUTTON, timeout=20000)
+        page.click(ADD_FOLDER_ITEM, timeout=20000)
+        page.wait_for_selector(CREATE_FOLDER_POPUP, timeout=20000)
+
+        box = page.locator(FOLDER_NAME_INPUT)
+        box.click(timeout=10000)
+        box.fill("")
+        box.type(wanted, delay=25)
+        page.wait_for_timeout(500)
+        if normalise(box.input_value()) != wanted:
+            raise ISpringPublishingError(
+                f"the name box holds {box.input_value()!r}, not {wanted!r}",
+                user_message=USER_PUBLISH_FAILED,
+            )
+
+        page.click(CREATE_FOLDER_CONFIRM, timeout=20000)
+        page.wait_for_timeout(4000)
+
+        after = folder_titles(page, root)
+        if not any(title.lower() == wanted.lower() for title in after):
+            raise ISpringPublishingError(
+                f"created a folder but {wanted!r} is not in {parent!r} afterwards",
+                user_message=(
+                    f"Could not create the iSpring Cloud folder for {wanted!r}."
+                ),
+            )
+        _note("created the institution folder", institution=wanted, parent=parent)
+        return True
+
+
 def fetch_embed(
     material: str,
     institution: str,
@@ -2574,7 +2874,7 @@ def publish_to_cloud(
     *,
     institution: str,
     content_name: str,
-    parent_folder: str = "PPT Migration",
+    parent_folders: Sequence[str] = ("PPT Migration", "PPT migration New"),
     cdp_url: str = "http://127.0.0.1:9222",
     publish_timeout_s: float = 1800,
     close_powerpoint_after: bool = True,
@@ -2601,6 +2901,14 @@ def publish_to_cloud(
         if not skip_open:
             app = open_presentation(pptx)
         window = find_powerpoint_window()
+        # The picker is clicked with a real mouse click, which lands wherever
+        # the front window is. The folder-creation step puts Chrome in front,
+        # so on the retry PowerPoint has to be brought back first.
+        try:
+            window.set_focus()
+            time.sleep(1)
+        except Exception:  # noqa: BLE001
+            _warn("could not bring PowerPoint to the front")
         dismiss_nuisance_dialogs(window)
         answer_repair_prompt()
 
@@ -2616,7 +2924,7 @@ def publish_to_cloud(
                 )
             set_text(field, content_name, "content name")
 
-        pick_project(dialog, institution, parent_folder)
+        pick_project(dialog, institution, parent_folders)
 
         publish = dialog.child_window(auto_id=ID_OK, control_type="Button")
         if not publish.exists():

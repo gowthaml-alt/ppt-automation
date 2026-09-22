@@ -147,3 +147,37 @@ def test_republish_confirms_overwrite_of_the_same_job_id():
     assert not is_overwrite_prompt("Publishing is complete!")
     assert preferred_overwrite_button(["Cancel", "Yes"]) == "Yes"
     assert preferred_overwrite_button(["Replace", "No"]) == "Replace"
+
+
+# --- which folder a clashing institution name lands in ----------------------
+
+PARENTS = ["PPT Migration", "PPT migration New"]
+
+
+def _choose(placed, parents=PARENTS, institution="College Dekho"):
+    from publisher.ispring_cloud import choose_match
+
+    return choose_match(placed, parents, institution)
+
+
+def test_clash_takes_the_first_parent_listed():
+    """College Dekho has a folder under both. The order decides, not the tree."""
+    chosen = _choose([("PPT migration New", "new"), ("PPT Migration", "old")])
+    assert chosen == ["old"]
+
+
+def test_reversed_order_takes_the_other_parent():
+    chosen = _choose(
+        [("PPT migration New", "new"), ("PPT Migration", "old")],
+        parents=list(reversed(PARENTS)),
+    )
+    assert chosen == ["new"]
+
+
+def test_a_flat_tree_keeps_its_matches():
+    """No row knows its parent: publish anyway rather than claim it is missing."""
+    assert _choose([("", "row")]) == ["row"]
+
+
+def test_nothing_found_stays_nothing():
+    assert _choose([]) == []

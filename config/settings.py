@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
+    # The terminal is read by a person, the file by grep. "text" gives the
+    # terminal one readable line per event; the file stays JSON either way.
+    log_console_format: Literal["text", "json"] = "text"
 
     backend_base_url: str = ""
 
@@ -51,8 +54,14 @@ class Settings(BaseSettings):
     # vba and cli were removed: probing the installed Suite 11 showed the
     # add-in has no automation object, no macro entry and no command line.
     ispring_adapter: Literal["not_configured", "fake", "uia"] = "not_configured"
-    # Folder in iSpring Cloud that holds one project per institution.
-    ispring_parent_folder: str = "PPT Migration"
+    # The folders in iSpring Cloud that hold one folder per institution.
+    # Both are searched: institutions were split across the two over time,
+    # and 4 names exist under both. The first one listed wins a clash.
+    ispring_parent_folders: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["PPT Migration", "PPT migration New"]
+    )
+    # Where a folder is created for an institution that has none.
+    ispring_new_institution_parent: str = "PPT migration New"
     # Chrome to attach to for the share step. That browser must already be
     # signed in to iSpring Cloud; see scripts/start_ispring_chrome.cmd.
     ispring_chrome_cdp_url: str = "http://127.0.0.1:9222"
@@ -82,9 +91,11 @@ class Settings(BaseSettings):
     local_storage_root: str = ""
     local_storage_public_base_url: str = ""
 
-    @field_validator("download_allowed_hosts", mode="before")
+    @field_validator(
+        "download_allowed_hosts", "ispring_parent_folders", mode="before"
+    )
     @classmethod
-    def _split_hosts(cls, value: object) -> object:
+    def _split_csv(cls, value: object) -> object:
         if isinstance(value, str):
             return [host.strip() for host in value.split(",") if host.strip()]
         return value

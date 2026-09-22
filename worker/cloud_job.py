@@ -27,8 +27,17 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from config.settings import Settings
-from publisher.ispring_cloud import CloudPublishResult, RepairPromptWatcher, publish_to_cloud
-from utils.exceptions import DownloadError, PowerPointAutomationError
+from publisher.ispring_cloud import (
+    CloudPublishResult,
+    RepairPromptWatcher,
+    ensure_project_folder,
+    publish_to_cloud,
+)
+from utils.exceptions import (
+    DownloadError,
+    PowerPointAutomationError,
+    ProjectMissingError,
+)
 from utils.http import create_sync_client
 from utils.logging_config import scrub_url
 from utils.validators import (
@@ -410,20 +419,46 @@ def run_cloud_job(
         service, in_use, prompts = open_with_repair(deck, settings)
         repaired = damaged or in_use != deck or prompts > 0
 
-        result: CloudPublishResult = publish_to_cloud(
-            in_use,
-            institution=institution_name,
-            content_name=publish_name,
-            cover_title=material_name,
-            parent_folder=settings.ispring_parent_folder,
-            cdp_url=settings.ispring_chrome_cdp_url,
-            publish_timeout_s=settings.ispring_publish_timeout_seconds,
-            close_powerpoint_after=False,
-            skip_open=True,
-            browser_profile_dir=settings.ispring_chrome_profile_dir,
-            browser_path=settings.ispring_chrome_path,
-            cloud_url=settings.ispring_cloud_url,
-        )
+        def publish_once() -> CloudPublishResult:
+            return publish_to_cloud(
+                in_use,
+                institution=institution_name,
+                content_name=publish_name,
+                cover_title=material_name,
+                parent_folders=settings.ispring_parent_folders,
+                cdp_url=settings.ispring_chrome_cdp_url,
+                publish_timeout_s=settings.ispring_publish_timeout_seconds,
+                close_powerpoint_after=False,
+                skip_open=True,
+                browser_profile_dir=settings.ispring_chrome_profile_dir,
+                browser_path=settings.ispring_chrome_path,
+                cloud_url=settings.ispring_cloud_url,
+            )
+
+        try:
+            result: CloudPublishResult = publish_once()
+        except ProjectMissingError:
+            # A new institution: nobody has made it a folder yet. Make one and
+            # publish again. Once only — if the folder is still not in the
+            # picker after that, something is wrong that another round of the
+            # same will not fix.
+            logger.info(
+                "no folder for this institution yet; creating one",
+                extra={
+                    "stage": "ispring_publish",
+                    "institution": institution_name,
+                    "parent": settings.ispring_new_institution_parent,
+                },
+            )
+            ensure_project_folder(
+                institution_name,
+                settings.ispring_new_institution_parent,
+                settings.ispring_chrome_cdp_url,
+                profile_dir=settings.ispring_chrome_profile_dir,
+                chrome_path=settings.ispring_chrome_path,
+                cloud_url=settings.ispring_cloud_url,
+            )
+            result = publish_once()
         published = True
     finally:
         # PowerPoint has to let go of the file before it can be deleted.

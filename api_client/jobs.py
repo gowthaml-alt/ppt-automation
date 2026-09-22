@@ -35,6 +35,8 @@ TOKEN_HEADER = "X-PPT-WORKER-TOKEN"
 # Password for every PHP queue call. Not read from env. Never invent another.
 WORKER_TOKEN = "EdmPptWk_93e104bb70c17cc560f21e0b46e80bdb"
 SUCCESS_CODE = "success"
+# Resource::createJson() puts 200 in "code", not a word.
+HTTP_OK_CODE = 200
 
 RESULT_STAGES = frozenset({"download", "ispring", "upload", "callback"})
 
@@ -101,7 +103,20 @@ def _join_url(base: str, path: str) -> str:
 
 
 def _is_success_code(code: Any) -> bool:
-    return isinstance(code, str) and code.strip().lower() == SUCCESS_CODE
+    """Did the API say this call worked?
+
+    PHP's Resource::createJson() answers {"code": 200, "message": "Success"},
+    so the integer 200 is the shape that actually arrives. The string form is
+    still accepted for anything that reports "success" instead.
+    """
+    if isinstance(code, bool):
+        return False
+    if isinstance(code, int):
+        return code == HTTP_OK_CODE
+    if isinstance(code, str):
+        stripped = code.strip()
+        return stripped.lower() == SUCCESS_CODE or stripped == str(HTTP_OK_CODE)
+    return False
 
 
 def _optional_int(value: Any) -> int | None:
@@ -134,15 +149,20 @@ def parse_next_response(payload: Any) -> Job | None:
             f"GET next returned code={payload.get('code')!r}",
             user_message="The backend job API did not return success.",
         )
-    data = payload.get("data")
-    if data is None:
-        return None
-    if not isinstance(data, dict):
-        raise JobFetchError(
-            f"GET next data must be an object, got {type(data).__name__}",
-            user_message="The backend returned an unexpected job payload.",
-        )
-    material = data.get("material")
+    # createJson() merges its nodes into the top level, so "material" arrives
+    # beside "code". A "data" wrapper is still read when one is present.
+    if "material" in payload:
+        material = payload.get("material")
+    else:
+        data = payload.get("data")
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise JobFetchError(
+                f"GET next data must be an object, got {type(data).__name__}",
+                user_message="The backend returned an unexpected job payload.",
+            )
+        material = data.get("material")
     if material is None:
         return None
     if not isinstance(material, dict):
@@ -242,6 +262,7 @@ class BackendClient:
                 user_message="The backend URL is not configured.",
             )
         url = _join_url(self._settings.backend_base_url, NEXT_PATH)
+        logger.info("GET next job", extra={"url": scrub_url(url), "stage": "fetch"})
         attempts = max(1, self._settings.get_job_retry_attempts)
         last_error: Exception | None = None
         client, owns = self._client_or_new()
@@ -301,7 +322,16 @@ class BackendClient:
                         f"GET next job returned non-JSON: {exc}",
                         user_message="The backend job API returned invalid JSON.",
                     ) from exc
-                return parse_next_response(payload)
+                job = parse_next_response(payload)
+                logger.info(
+                    "got a job" if job is not None else "queue is empty",
+                    extra={
+                        "stage": "fetch",
+                        "status": response.status_code,
+                        "job_id": job.job_id if job is not None else None,
+                    },
+                )
+                return job
         finally:
             if owns:
                 client.close()
@@ -330,6 +360,10 @@ class BackendClient:
                 user_message="The worker produced an invalid result status.",
             )
         url = _join_url(self._settings.backend_base_url, RESULT_PATH)
+        logger.info(
+            "POST job result",
+            extra={"url": scrub_url(url), "stage": "callback", "status": status},
+        )
         if status == 2:
             payload: dict[str, Any] = {
                 "token": WORKER_TOKEN,

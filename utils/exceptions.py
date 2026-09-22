@@ -50,6 +50,18 @@ class ISpringTimeoutError(ISpringPublishingError):
     """Publishing exceeded ISPRING_PUBLISH_TIMEOUT_SECONDS."""
 
 
+class ProjectMissingError(ISpringPublishingError):
+    """The institution has no folder under either parent.
+
+    Its own class because the caller acts on it: it creates the folder and
+    publishes again, where any other publishing failure ends the job.
+    """
+
+    def __init__(self, message, *, institution="", user_message=None):
+        super().__init__(message, user_message=user_message)
+        self.institution = institution
+
+
 class OutputValidationError(PptAutomationError):
     stage = "output_validate"
 
