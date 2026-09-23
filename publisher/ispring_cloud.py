@@ -716,12 +716,34 @@ def scroll_into_view(control, picker):
         except Exception:  # noqa: BLE001
             continue
 
+    # Scroll the page, not the dialog around it.
+    #
+    # The project list is not a Windows tree at all: it is an embedded
+    # Internet Explorer view showing
+    # harshit.ispring.com/folder_selection_tree_for_products. The rows are
+    # plain Text nodes in that page, and a row below the fold reports a
+    # rectangle of (0, 0, 0, 0) — no size, no position — which is why
+    # "PPT migration New" could never be reached while "PPT Migration",
+    # sitting in view at y=424, always could.
+    #
+    # A wheel event has to land on the IE pane itself. Sent to the outer
+    # dialog pane it scrolls nothing, and the row stays sizeless however
+    # many turns are spent on it.
     surface = None
     for pane in picker.descendants(control_type="Pane"):
-        pane_rect = visible_rect(pane)
-        if pane_rect is not None and pane_rect.height() > 200:
+        try:
+            class_name = (pane.element_info.class_name or "").lower()
+        except Exception:  # noqa: BLE001
+            class_name = ""
+        if "internet explorer_server" in class_name:
             surface = pane
             break
+    if surface is None:
+        for pane in picker.descendants(control_type="Pane"):
+            pane_rect = visible_rect(pane)
+            if pane_rect is not None and pane_rect.height() > 200:
+                surface = pane
+                break
     surface = surface or picker
     # 80 turns was set when the tree held one parent. With both open it holds
     # 340 + 138 folders, and three lines a turn does not get to the bottom —
