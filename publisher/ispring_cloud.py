@@ -747,6 +747,28 @@ def scroll_into_view(control, picker):
     )
 
 
+def resolve_parent(picker, label: str) -> str:
+    """The row in the tree that is this parent, however it is written there.
+
+    The configured name has to match the tree exactly, and a tree label is
+    not always the plain project name — the library shows several projects
+    with the owner appended, as in "Edmingle Owner (server@edmingle.com)".
+    One character out and the branch is never opened, so every folder under
+    it is invisible.
+
+    Exact wins. Failing that, the shortest row containing the name: "PPT
+    Migration" is a prefix of "PPT migration New", so longest-match or
+    first-match would quietly open the wrong branch.
+    """
+    exact = find_named(picker, label)
+    if exact:
+        return normalise(exact[0].window_text())
+    near = find_named(picker, label, exact=False)
+    if not near:
+        return ""
+    return min((normalise(c.window_text()) for c in near), key=len)
+
+
 def expand_branch(picker, label: str) -> str:
     """Open a parent branch. Returns what happened, for the log.
 
@@ -890,6 +912,16 @@ def pick_project(dialog, institution: str, parent_folders: Sequence[str]) -> Non
     # from the folder not existing, and is why a folder that was there all
     # along came back as missing. So the branches are opened and then the
     # search is repeated until the row appears or the time runs out.
+    # What the configured parents are actually called in this tree.
+    resolved = []
+    for parent in parents:
+        actual = resolve_parent(picker, parent)
+        _note("parent folder", configured=parent, found_as=actual or "(not found)")
+        if actual:
+            resolved.append(actual)
+    if resolved:
+        parents = resolved
+
     matches = []
     deadline = time.monotonic() + PICKER_SEARCH_S
     rounds = 0

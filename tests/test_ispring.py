@@ -225,3 +225,50 @@ def test_only_the_iframe_is_touched():
     )
     assert '<div width="500">' in out
     assert 'width="100%"' in out
+
+
+# --- the parent name has to match the label the tree really uses -----------
+
+
+class _Row:
+    def __init__(self, text):
+        self._text = text
+
+    def window_text(self):
+        return self._text
+
+
+class _Picker:
+    def __init__(self, names):
+        self._rows = [_Row(n) for n in names]
+
+    def descendants(self, **_kw):
+        return self._rows
+
+
+def _resolve(names, label):
+    from publisher.ispring_cloud import resolve_parent
+
+    return resolve_parent(_Picker(names), label)
+
+
+TREE = ["PPT Migration", "PPT migration New", "Sample Materials"]
+
+
+def test_exact_name_is_used_as_is():
+    assert _resolve(TREE, "PPT migration New") == "PPT migration New"
+
+
+def test_the_shorter_branch_wins_a_prefix_clash():
+    """'PPT Migration' is inside 'PPT migration New'. Longest-match opens
+    the wrong branch and every folder under the right one disappears."""
+    assert _resolve(TREE, "PPT Migration") == "PPT Migration"
+
+
+def test_a_label_with_something_appended_is_still_found():
+    tree = ["PPT migration New (Edmingle Owner)", "Sample Materials"]
+    assert _resolve(tree, "PPT migration New") == "PPT migration New (Edmingle Owner)"
+
+
+def test_a_name_that_is_not_there_resolves_to_nothing():
+    assert _resolve(TREE, "PPT migration Older") == ""
