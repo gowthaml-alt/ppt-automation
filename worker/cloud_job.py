@@ -39,7 +39,7 @@ from utils.exceptions import (
     ProjectMissingError,
 )
 from utils.http import create_sync_client
-from utils.logging_config import scrub_url
+from utils.logging_config import scrub_url, set_stage
 from utils.validators import (
     USER_PASSWORD_PROTECTED,
     assert_valid_pptx_package,
@@ -419,6 +419,7 @@ def run_cloud_job(
             deck = workspace / f"{SAFE_NAME}{_extension_for(original.name)}"
             shutil.copy2(original, deck)
 
+        set_stage("ispring")
         damaged = inspect(deck)
         service, in_use, prompts = open_with_repair(deck, settings)
         repaired = damaged or in_use != deck or prompts > 0
@@ -454,13 +455,27 @@ def run_cloud_job(
                     "parent": settings.ispring_new_institution_parent,
                 },
             )
-            ensure_project_folder(
+            made = ensure_project_folder(
                 institution_name,
                 settings.ispring_new_institution_parent,
                 settings.ispring_chrome_cdp_url,
                 profile_dir=settings.ispring_chrome_profile_dir,
                 chrome_path=settings.ispring_chrome_path,
                 cloud_url=settings.ispring_cloud_url,
+            )
+            # "already there" and "just made it" look identical from the
+            # picker's side when the second attempt fails, and they point at
+            # completely different problems. Say which one happened.
+            logger.info(
+                "folder created" if made else
+                "the folder was already in the library, so the picker not "
+                "seeing it is not about it being missing",
+                extra={
+                    "stage": "ispring",
+                    "institution": institution_name,
+                    "parent": settings.ispring_new_institution_parent,
+                    "created": bool(made),
+                },
             )
 
             # PowerPoint has to be restarted before it can see the folder.
