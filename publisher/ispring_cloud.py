@@ -19,6 +19,7 @@ desktop, and interface automation stops working there.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import base64
 import os
@@ -2816,6 +2817,108 @@ def folder_titles(page, root_folder: str) -> list:
     ]
 
 
+@contextlib.contextmanager
+def cloud_page(
+    cdp_url: str,
+    profile_dir: str,
+    chrome_path: str,
+    cloud_url: str,
+):
+    """A page on the signed-in library, for the steps that ask it questions.
+
+    Attaches to the Chrome that is already running and already signed in;
+    nothing is launched and no profile is made, so one login by hand keeps
+    working for every run after it.
+    """
+    from playwright.sync_api import sync_playwright
+
+    if not debug_port_open(cdp_url):
+        _note("no browser on the debug port; starting one")
+        start_browser(cdp_url, profile_dir, chrome_path)
+
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.connect_over_cdp(cdp_url)
+        except Exception as exc:  # noqa: BLE001
+            raise ISpringPublishingError(
+                f"could not attach to Chrome at {cdp_url}: {exc}",
+                user_message=(
+                    "The browser this step uses is not running. Start it with "
+                    "scripts\\start_ispring_chrome.cmd, sign in to iSpring "
+                    "Cloud once, and leave it open."
+                ),
+            ) from exc
+        if not browser.contexts:
+            raise ISpringPublishingError(
+                "attached to Chrome but it has no windows open",
+                user_message=USER_PUBLISH_FAILED,
+            )
+        context = browser.contexts[0]
+        page = context.pages[-1] if context.pages else context.new_page()
+        try:
+            page.goto(cloud_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as exc:  # noqa: BLE001
+            raise ISpringPublishingError(
+                f"could not open {cloud_url}: {exc}",
+                user_message=USER_PUBLISH_FAILED,
+            ) from exc
+        page.wait_for_timeout(3000)
+        yield page
+
+
+def locate_institution(
+    institution: str,
+    parents,
+    cdp_url: str,
+    profile_dir: str = r"C:\ispring-chrome-profile",
+    chrome_path: str = "",
+    cloud_url: str = "https://harshit.ispring.com/",
+):
+    """Which parent holds this institution's folder, asked of the library.
+
+    Returns (parent as the library spells it, folder as the library spells
+    it), or ("", "") when no parent has it.
+
+    This is what stops the publish dialog being used as a search engine. The
+    picker is a web page in an embedded browser: opening "PPT Migration"
+    drops 340 rows into it, and reaching anything past them means scrolling
+    the page a row at a time. Opening both parents to find one folder is
+    minutes of scrolling for an answer the library will give in one request.
+
+    So the answer is fetched first and only the one branch that holds the
+    folder is opened. The exact spelling comes back too, so the picker is
+    matched against what is really there rather than what the queue row said.
+    """
+    wanted = normalise(institution)
+    if not wanted:
+        return "", ""
+
+    with cloud_page(cdp_url, profile_dir, chrome_path, cloud_url) as page:
+        listing = _cloud_json(page, PROJECT_LIST_API)
+        projects = listing.get("projects") if isinstance(listing, dict) else listing
+        by_title = {
+            normalise(project.get("title", "")).lower(): project
+            for project in (projects or [])
+        }
+        for parent in parents:
+            project = by_title.get(normalise(parent).lower())
+            if project is None:
+                _warn("no such project in the library", parent=parent)
+                continue
+            titles = folder_titles(page, str(project.get("rootFolder") or ""))
+            for title in titles:
+                if title.lower() == wanted.lower():
+                    _note(
+                        "institution folder located",
+                        institution=wanted,
+                        parent=normalise(project.get("title", "")),
+                        folders_in_parent=len(titles),
+                    )
+                    return normalise(project.get("title", "")), title
+    _note("no parent holds this institution", institution=wanted)
+    return "", ""
+
+
 def ensure_project_folder(
     institution: str,
     parent_folder: str,
@@ -3163,6 +3266,31 @@ def publish_to_cloud(
     first.
     """
     started = time.monotonic()
+
+    # Ask the library where the folder is before touching PowerPoint.
+    #
+    # One request answers what the publish dialog cannot: which parent holds
+    # this institution, and how the library spells it. Without it the picker
+    # has to open every parent and scroll through hundreds of rows to find
+    # out — and if the answer is "nowhere", it has done all of that to learn
+    # the one thing that could have been known up front.
+    holder, folder_title = locate_institution(
+        institution,
+        parent_folders,
+        cdp_url,
+        profile_dir=browser_profile_dir,
+        chrome_path=browser_path,
+        cloud_url=cloud_url,
+    )
+    if not holder:
+        raise ProjectMissingError(
+            f"no folder for {institution!r} in {list(parent_folders)}",
+            institution=institution,
+            user_message=(
+                f"No iSpring Cloud folder named {institution!r} was found."
+            ),
+        )
+
     app = None
     window = None
     try:
@@ -3192,7 +3320,7 @@ def publish_to_cloud(
                 )
             set_text(field, content_name, "content name")
 
-        pick_project(dialog, institution, parent_folders)
+        pick_project(dialog, folder_title, [holder])
 
         publish = dialog.child_window(auto_id=ID_OK, control_type="Button")
         if not publish.exists():
