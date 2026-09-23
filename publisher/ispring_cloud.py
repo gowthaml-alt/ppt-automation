@@ -138,6 +138,8 @@ UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "20"))
 # How long to keep looking for the institution in the project picker
 # while the tree loads its hundreds of folders.
 PICKER_SEARCH_S = float(os.environ.get("ISPRING_PICKER_WAIT", "45"))
+# Floor for how far to scroll the project list looking for a row.
+SCROLL_TURNS_MIN = int(os.environ.get("ISPRING_SCROLL_TURNS", "250"))
 
 USER_PUBLISH_FAILED = "The presentation could not be published to iSpring Cloud."
 USER_LINK_FAILED = "The presentation was published but no share link could be read."
@@ -721,7 +723,12 @@ def scroll_into_view(control, picker):
             surface = pane
             break
     surface = surface or picker
-    for turn in range(80):
+    # 80 turns was set when the tree held one parent. With both open it holds
+    # 340 + 138 folders, and three lines a turn does not get to the bottom —
+    # the row is there, the scroll just stops short, and the error says the
+    # project was never found. Scale it to what is actually on screen.
+    turns = max(SCROLL_TURNS_MIN, len(picker.descendants()) // 2)
+    for turn in range(turns):
         try:
             surface.wheel_mouse_input(wheel_dist=-3)
         except Exception as exc:  # noqa: BLE001
@@ -735,13 +742,25 @@ def scroll_into_view(control, picker):
             _note("scrolled project row into view", wheel_turns=turn + 1)
             return rect
     raise ISpringPublishingError(
-        "scrolled to the end of the project list and the row never appeared",
+        f"scrolled {turns} turns and the row never appeared",
         user_message=USER_PUBLISH_FAILED,
     )
 
 
-def expand_branch(picker, label: str) -> bool:
-    for control in find_named(picker, label):
+def expand_branch(picker, label: str) -> str:
+    """Open a parent branch. Returns what happened, for the log.
+
+    One of: "open" (it was already), "expanded", "expanded by double click",
+    "not in the tree", or "could not expand". It used to return a bare
+    False for the last two, which meant a parent that was never opened —
+    or never even there — looked exactly like one that opened fine, and
+    every folder under it was invisible with nothing saying why.
+    """
+    found = find_named(picker, label)
+    if not found:
+        return "not in the tree"
+
+    for control in found:
         if visible_rect(control) is None:
             try:
                 scroll_into_view(control, picker)
@@ -749,26 +768,23 @@ def expand_branch(picker, label: str) -> bool:
                 continue
         # Ask the tree to expand. A double-click toggles, so on a branch that
         # is already open it would close it and hide the very rows being
-        # looked for — which used not to matter when this ran only as a last
-        # resort, and does now that both parents are opened every time.
+        # looked for.
         try:
             expander = control.iface_expand_collapse
             if expander.CurrentExpandCollapseState == 1:  # already expanded
-                return True
+                return "open"
             expander.Expand()
-            _note("expanded project branch", branch=label)
             time.sleep(2)
-            return True
+            return "expanded"
         except Exception:  # noqa: BLE001
             pass
         try:
             control.double_click_input()
-            _note("expanded project branch", branch=label, how="double click")
             time.sleep(2)
-            return True
+            return "expanded by double click"
         except Exception:  # noqa: BLE001
             continue
-    return False
+    return "could not expand"
 
 
 def ancestor_label(control, labels: Sequence[str], max_up: int = 8) -> str:
@@ -880,7 +896,17 @@ def pick_project(dialog, institution: str, parent_folders: Sequence[str]) -> Non
     while time.monotonic() < deadline:
         rounds += 1
         for parent in parents:
-            expand_branch(picker, parent)
+            outcome = expand_branch(picker, parent)
+            # Every parent, every round. If one of them never opens, this is
+            # the line that says so — and a parent that never opens is a
+            # parent whose institutions cannot be found.
+            _note(
+                "project branch",
+                branch=parent,
+                outcome=outcome,
+                round=rounds,
+                rows=len(picker.descendants()),
+            )
         matches = choose_match(
             [(ancestor_label(control, parents), control)
              for control in find_named(picker, institution)],
