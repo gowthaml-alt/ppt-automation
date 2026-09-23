@@ -11,11 +11,19 @@ REM  It finds its own folder, turns the Python environment on, and
 REM  checks the things that people forget. Nothing to remember, and
 REM  no need to be in the right directory.
 REM ===========================================================
-setlocal
+setlocal enabledelayedexpansion
 
 REM Work from the folder this file lives in, whatever the user's
 REM current directory is. .env is read from there, so this matters.
 pushd "%~dp0"
+
+REM Was this double-clicked in Explorer, or typed at a prompt?
+REM Explorer runs it with /c, which closes the window the moment the
+REM script ends - taking any error message with it. When that is how we
+REM were started, wait for a key at the end so it can be read.
+set KEEPOPEN=
+echo %cmdcmdline% | find /i "%~nx0" >nul
+if not errorlevel 1 set KEEPOPEN=1
 
 set ACTION=%~1
 if "%ACTION%"=="" set ACTION=run
@@ -53,8 +61,34 @@ goto do_run
 
 REM -----------------------------------------------------------
 :do_run
+REM Check the machine before starting, and say so plainly.
+REM
+REM Three failures in a row that point at this machine and the worker
+REM stops taking jobs, so one broken machine cannot mark the whole
+REM queue failed. It stays stopped until somebody says otherwise -
+REM clearing it automatically here would undo the only thing that
+REM protects the queue. So it is reported, and the answer is a person's.
+python scripts\worker_health.py
+if errorlevel 1 (
+  echo.
+  echo   This machine is marked UNHEALTHY and will not take any jobs.
+  echo.
+  echo   The failures above are why. If the machine has been put right -
+  echo   iSpring signed in, PowerPoint working - it can go back in service.
+  echo.
+  set /p BACKINSERVICE="   Put it back in service and start? (y/N): "
+  if /i not "!BACKINSERVICE!"=="y" (
+    echo.
+    echo   Left as it is. Nothing was started.
+    echo.
+    goto stop_fail
+  )
+  python scripts\worker_health.py --clear
+)
+
 echo.
 echo   Starting the PPT worker. Press Ctrl+C to stop it.
+echo   It opens Chrome and PowerPoint by itself when it needs them.
 echo.
 python run.py
 goto stop_ok
@@ -117,11 +151,13 @@ goto stop_ok
 
 REM -----------------------------------------------------------
 :stop_fail
+if defined KEEPOPEN pause
 popd
 endlocal
 exit /b 1
 
 :stop_ok
+if defined KEEPOPEN pause
 popd
 endlocal
 exit /b 0
