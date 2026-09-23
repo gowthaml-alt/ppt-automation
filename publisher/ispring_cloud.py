@@ -140,6 +140,8 @@ UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "20"))
 PICKER_SEARCH_S = float(os.environ.get("ISPRING_PICKER_WAIT", "45"))
 # Floor for how far to scroll the project list looking for a row.
 SCROLL_TURNS_MIN = int(os.environ.get("ISPRING_SCROLL_TURNS", "250"))
+# The chevron that opens a branch is drawn this far left of its label.
+CHEVRON_OFFSET = int(os.environ.get("ISPRING_CHEVRON_OFFSET", "70"))
 
 USER_PUBLISH_FAILED = "The presentation could not be published to iSpring Cloud."
 USER_LINK_FAILED = "The presentation was published but no share link could be read."
@@ -794,41 +796,64 @@ def resolve_parent(picker, label: str) -> str:
 def expand_branch(picker, label: str) -> str:
     """Open a parent branch. Returns what happened, for the log.
 
-    One of: "open" (it was already), "expanded", "expanded by double click",
-    "not in the tree", or "could not expand". It used to return a bare
-    False for the last two, which meant a parent that was never opened —
-    or never even there — looked exactly like one that opened fine, and
-    every folder under it was invisible with nothing saying why.
+    The tree is a web page in an embedded Internet Explorer view, so a row
+    is a plain Text node with a chevron drawn to its left — not a TreeItem
+    with an expand pattern. Two things follow.
+
+    First, the same name can appear more than once in that page, and one of
+    the copies can be a node with no size at all. Trying that one first means
+    scrolling the page away from the copy that was on screen and clickable,
+    so rows that do have a rectangle are tried first and scrolling is a last
+    resort, not a first move.
+
+    Second, opening a branch means hitting the chevron. Double-clicking the
+    label works in some builds and does nothing in others, so the chevron is
+    tried first and the double-click is the fallback. Success is judged by
+    the tree growing, because neither click reports anything.
     """
     found = find_named(picker, label)
     if not found:
         return "not in the tree"
 
-    for control in found:
-        if visible_rect(control) is None:
+    candidates = [(control, visible_rect(control)) for control in found]
+    candidates.sort(key=lambda pair: 0 if pair[1] is not None else 1)
+
+    try:
+        before = len(picker.descendants())
+    except Exception:  # noqa: BLE001
+        before = 0
+
+    for control, rect in candidates:
+        if rect is None:
             try:
-                scroll_into_view(control, picker)
+                rect = scroll_into_view(control, picker)
             except ISpringPublishingError:
                 continue
-        # Ask the tree to expand. A double-click toggles, so on a branch that
-        # is already open it would close it and hide the very rows being
-        # looked for.
-        try:
-            expander = control.iface_expand_collapse
-            if expander.CurrentExpandCollapseState == 1:  # already expanded
-                return "open"
-            expander.Expand()
-            time.sleep(2)
-            return "expanded"
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            control.double_click_input()
-            time.sleep(2)
-            return "expanded by double click"
-        except Exception:  # noqa: BLE001
+        if rect is None:
             continue
-    return "could not expand"
+
+        middle = (rect.top + rect.bottom) // 2
+        for how in ("chevron", "double click"):
+            try:
+                if how == "chevron":
+                    from pywinauto import mouse  # type: ignore
+
+                    mouse.click(coords=(rect.left - CHEVRON_OFFSET, middle))
+                else:
+                    control.double_click_input()
+            except Exception:  # noqa: BLE001
+                continue
+            time.sleep(2)
+            try:
+                after = len(picker.descendants())
+            except Exception:  # noqa: BLE001
+                after = before
+            if after > before:
+                return f"expanded by {how} (+{after - before} rows)"
+
+    # No growth is not the same as failure: a branch already open stays the
+    # size it was, and so does one holding nothing.
+    return "no change"
 
 
 def ancestor_label(control, labels: Sequence[str], max_up: int = 8) -> str:
