@@ -135,6 +135,9 @@ OFF_RE = re.compile(r"^\s*off\s*$", re.I)
 # After PowerPoint says publishing is complete, iSpring keeps uploading to
 # the cloud for a few seconds. ISPRING_UPLOAD_WAIT overrides this.
 UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "20"))
+# How long to keep looking for the institution in the project picker
+# while the tree loads its hundreds of folders.
+PICKER_SEARCH_S = float(os.environ.get("ISPRING_PICKER_WAIT", "45"))
 
 USER_PUBLISH_FAILED = "The presentation could not be published to iSpring Cloud."
 USER_LINK_FAILED = "The presentation was published but no share link could be read."
@@ -863,24 +866,58 @@ def pick_project(dialog, institution: str, parent_folders: Sequence[str]) -> Non
     )
     picker.wait("exists visible", timeout=60)
 
-    # A collapsed branch has no rows under it to find.
-    for parent in parents:
-        expand_branch(picker, parent)
+    # Expand, then keep looking until it turns up.
+    #
+    # The tree fills itself in after a branch opens, and these branches hold
+    # 340 and 133 folders. Looking once, straight after expanding, reads a
+    # tree that is still loading and finds nothing — which is indistinguishable
+    # from the folder not existing, and is why a folder that was there all
+    # along came back as missing. So the branches are opened and then the
+    # search is repeated until the row appears or the time runs out.
+    matches = []
+    deadline = time.monotonic() + PICKER_SEARCH_S
+    rounds = 0
+    while time.monotonic() < deadline:
+        rounds += 1
+        for parent in parents:
+            expand_branch(picker, parent)
+        matches = choose_match(
+            [(ancestor_label(control, parents), control)
+             for control in find_named(picker, institution)],
+            parents,
+            institution,
+        )
+        if matches:
+            break
+        time.sleep(2)
 
-    matches = choose_match(
-        [(ancestor_label(control, parents), control)
-         for control in find_named(picker, institution)],
-        parents,
-        institution,
-    )
+    if matches and rounds > 1:
+        _note("the folder appeared once the tree finished loading",
+              institution=institution, rounds=rounds)
 
     if not matches:
         near = find_named(picker, institution, exact=False)
         hint = ", ".join(normalise(c.window_text()) for c in near[:5]) or "nothing similar"
+        # What the picker was actually holding. Without this the error says
+        # only that the name was not there, which is the one thing already
+        # known, and every diagnosis after it is guesswork.
+        listed = [
+            name for name in (
+                normalise(c.window_text()) for c in picker.descendants()
+            ) if name
+        ]
+        _warn(
+            "the picker did not have this folder",
+            institution=institution,
+            rows=len(listed),
+            sample=listed[:40],
+        )
         dismiss_window(picker, "the project picker")
         dismiss_window(dialog, "the publish dialog")
         raise ProjectMissingError(
-            f"{institution!r} has no folder under {parents} (closest: {hint})",
+            f"{institution!r} has no folder under {parents} after "
+            f"{PICKER_SEARCH_S:.0f}s and {rounds} looks "
+            f"({len(listed)} rows in the picker, closest: {hint})",
             institution=institution,
             user_message=(
                 f"No iSpring Cloud folder named {institution!r} was found."
