@@ -474,7 +474,9 @@ def run_cloud_job(
                     "stage": "ispring",
                     "institution": institution_name,
                     "parent": settings.ispring_new_institution_parent,
-                    "created": bool(made),
+                    # Not "created": logging reserves that name for the
+                    # record's own timestamp and raises if you reuse it.
+                    "folder_created": bool(made),
                 },
             )
 
