@@ -35,8 +35,10 @@ class FakeBackend:
     jobs: list[Job | None] = field(default_factory=list)
     results: list[dict] = field(default_factory=list)
     fail_callback: bool = False
+    asked: list = field(default_factory=list)
 
-    def get_next_job(self) -> Job | None:
+    def get_next_job(self, base_url: str | None = None) -> Job | None:
+        self.asked.append(base_url)
         if not self.jobs:
             return None
         return self.jobs.pop(0)

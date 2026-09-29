@@ -48,6 +48,29 @@ PHP queue  --GET /next-->  Windows poller  --POST /result-->  PHP
 One OS process. One job at a time. Never `GET /next` again until the current
 job has `POST /result`.
 
+### Private servers
+
+Six institutions run their own copy of the backend, so their queue is on their
+own host, not the shared one. Same two routes, same token. The worker polls
+them itself:
+
+- shared queue: every `POLL_INTERVAL_SECONDS` (30s)
+- private queues: one round every `PRIVATE_POLL_INTERVAL_SECONDS` (600s)
+
+A round walks the servers in order and empties each one before moving to the
+next, up to `PRIVATE_MAX_PER_ROUND` decks per server. Whatever is left waits
+for the next round. A server that is down is logged and skipped; it never
+stops the round or the shared queue.
+
+The result always goes back to the server the job came from — `Job.base_url`
+carries it. Post a private server's result to the shared backend and that row
+stays in progress for ever.
+
+Hosts are in `Settings.private_base_urls`, copied from
+`SupportPanelCatalog.php`. Each private server needs the ppt routes deployed
+and its own Slack webhook in `Constants.php`, or its decks publish with no
+notification.
+
 ## Windows requirements
 
 - Windows 365 Cloud PC

@@ -10,6 +10,7 @@ from api_client.jobs import (
     RETRY_PATH,
     TOKEN_HEADER,
     BackendClient,
+    Job,
     error_code_for,
     parse_next_response,
     record_orphaned_output,
@@ -316,3 +317,56 @@ def test_parse_next_empty_queue_in_the_php_envelope():
 def test_parse_next_still_rejects_a_failure_from_php():
     with pytest.raises(JobFetchError):
         parse_next_response({"code": 2001, "message": "Not found"})
+
+
+def test_private_job_is_fetched_from_that_server(tmp_path):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json=SUCCESS_ENVELOPE)
+
+    client = _client(tmp_path, handler)
+    job = client.get_next_job("https://infs-api.example.com/nuSource/api/v1")
+    assert job is not None
+    assert job.base_url == "https://infs-api.example.com/nuSource/api/v1"
+    assert seen[0].startswith(
+        "https://infs-api.example.com/nuSource/api/v1/pptupdate/ispringcloud/next"
+    )
+
+
+def test_private_result_goes_back_to_the_same_server(tmp_path):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"code": 200, "message": "Success"})
+
+    job = Job(
+        job_id=1,
+        file_url="https://cdn.example.com/a.pptx",
+        base_url="https://infs-api.example.com/nuSource/api/v1",
+    )
+    client = _client(tmp_path, handler)
+    client.send_job_result(job, status=2, ispringcloud_link="<iframe></iframe>")
+    assert seen == [
+        "https://infs-api.example.com/nuSource/api/v1/pptupdate/ispringcloud/result"
+    ]
+
+
+def test_shared_result_still_goes_to_the_shared_server(tmp_path):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"code": 200, "message": "Success"})
+
+    client = _client(tmp_path, handler)
+    client.send_job_result(
+        Job(job_id=1, file_url="https://cdn.example.com/a.pptx"),
+        status=2,
+        ispringcloud_link="<iframe></iframe>",
+    )
+    assert seen == [
+        "https://api.example.com/nuSource/api/v1/pptupdate/ispringcloud/result"
+    ]

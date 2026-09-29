@@ -29,6 +29,24 @@ class Settings(BaseSettings):
     backend_base_url: str = ""
 
     poll_interval_seconds: int = 30
+
+    # Private-server institutions run their own copy of the backend, so their
+    # queue lives on their own host. Same two APIs, same token, just a slower
+    # clock: the shared queue is checked every poll_interval_seconds, these
+    # once every private_poll_interval_seconds. Hosts come from
+    # SupportPanelCatalog.php; set PRIVATE_BASE_URLS in .env to override.
+    private_base_urls: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "https://infs-api.edmingle.com/nuSource/api/v1",
+            "https://mahaskills-api.edmingle.com/nuSource/api/v1",
+            "https://mavensilicon-api.edmingle.com/nuSource/api/v1",
+            "https://mcgrawhill-api.edmingle.com/nuSource/api/v1",
+            "https://mitsde-api.edmingle.com/nuSource/api/v1",
+            "https://vyoma-api.edmingle.com/nuSource/api/v1",
+        ]
+    )
+    private_poll_interval_seconds: int = 600
+
     get_job_retry_attempts: int = 3
     callback_retry_attempts: int = 3
 
@@ -99,7 +117,10 @@ class Settings(BaseSettings):
     local_storage_public_base_url: str = ""
 
     @field_validator(
-        "download_allowed_hosts", "ispring_parent_folders", mode="before"
+        "download_allowed_hosts",
+        "ispring_parent_folders",
+        "private_base_urls",
+        mode="before",
     )
     @classmethod
     def _split_csv(cls, value: object) -> object:

@@ -81,6 +81,10 @@ class Job:
     material_name: str = ""
     institution_id: int | None = None
     institution_name: str | None = None
+    # Which backend handed this job over. Empty means the shared one. A
+    # private server's result has to go back to that same server, or its
+    # queue row never closes and the material never gets its link.
+    base_url: str = ""
 
     @property
     def queue_id(self) -> int:
@@ -137,7 +141,7 @@ def error_code_for(error: BaseException) -> str:
     return _ERROR_CODES.get(type(error).__name__, "UNEXPECTED")
 
 
-def parse_next_response(payload: Any) -> Job | None:
+def parse_next_response(payload: Any, base_url: str = "") -> Job | None:
     """Map GET /next JSON onto :class:`Job`. Extra keys are ignored."""
     if not isinstance(payload, dict):
         raise JobFetchError(
@@ -170,10 +174,10 @@ def parse_next_response(payload: Any) -> Job | None:
             f"GET next material must be an object, got {type(material).__name__}",
             user_message="The backend returned an unexpected job payload.",
         )
-    return _parse_material(material)
+    return _parse_material(material, base_url)
 
 
-def _parse_material(data: dict[str, Any]) -> Job:
+def _parse_material(data: dict[str, Any], base_url: str = "") -> Job:
     job_id = data.get("job_id")
     file_url = data.get("file_url")
     if job_id is None:
@@ -212,6 +216,7 @@ def _parse_material(data: dict[str, Any]) -> Job:
         material_name=str(material_name),
         institution_id=institution_id,
         institution_name=None if institution is None else str(institution),
+        base_url=base_url,
     )
 
 
@@ -255,13 +260,15 @@ class BackendClient:
             True,
         )
 
-    def get_next_job(self) -> Job | None:
-        if not self._settings.backend_base_url:
+    def get_next_job(self, base_url: str | None = None) -> Job | None:
+        """Ask a queue for one job. No base_url means the shared backend."""
+        base = base_url or self._settings.backend_base_url
+        if not base:
             raise JobFetchError(
                 "BACKEND_BASE_URL is not configured",
                 user_message="The backend URL is not configured.",
             )
-        url = _join_url(self._settings.backend_base_url, NEXT_PATH)
+        url = _join_url(base, NEXT_PATH)
         logger.info("GET next job", extra={"url": scrub_url(url), "stage": "fetch"})
         attempts = max(1, self._settings.get_job_retry_attempts)
         last_error: Exception | None = None
@@ -322,7 +329,7 @@ class BackendClient:
                         f"GET next job returned non-JSON: {exc}",
                         user_message="The backend job API returned invalid JSON.",
                     ) from exc
-                job = parse_next_response(payload)
+                job = parse_next_response(payload, base_url or "")
                 logger.info(
                     "got a job" if job is not None else "queue is empty",
                     extra={
@@ -349,7 +356,8 @@ class BackendClient:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> None:
-        if not self._settings.backend_base_url:
+        base = job.base_url or self._settings.backend_base_url
+        if not base:
             raise CallbackError(
                 "BACKEND_BASE_URL is not configured",
                 user_message="The backend URL is not configured.",
@@ -359,7 +367,7 @@ class BackendClient:
                 f"result status must be 2 or 3, got {status!r}",
                 user_message="The worker produced an invalid result status.",
             )
-        url = _join_url(self._settings.backend_base_url, RESULT_PATH)
+        url = _join_url(base, RESULT_PATH)
         logger.info(
             "POST job result",
             extra={"url": scrub_url(url), "stage": "callback", "status": status},
