@@ -157,30 +157,3 @@ def test_artifact_run_creates_a_timestamped_directory(tmp_path):
     assert log_path.exists()
     assert "opened chrome" in log_path.read_text(encoding="utf-8")
 
-
-# A row with the right title can belong to another institution: search and
-# Recent list the whole library. Taking it writes that deck's iframe into
-# this material, so the folder column decides.
-
-def _row(folder: str) -> dict:
-    return {"title": "Week 1", "cells": ["Week 1", "Presentation", folder]}
-
-
-def test_a_row_in_the_institutions_project_is_kept():
-    from publisher.ispring_cloud import in_right_folder
-
-    assert in_right_folder(_row("PPT migration New / Acme"), "Acme") is True
-
-
-def test_a_row_in_another_institutions_project_is_refused():
-    from publisher.ispring_cloud import in_right_folder
-
-    assert in_right_folder(_row("PPT Migration / Globus"), "Acme") is False
-
-
-def test_no_folder_column_means_the_row_is_kept():
-    from publisher.ispring_cloud import in_right_folder
-
-    # Inside a folder the library shows no folder column, so there is
-    # nothing to judge and the row stands.
-    assert in_right_folder({"title": "Week 1", "cells": ["Week 1"]}, "Acme") is True

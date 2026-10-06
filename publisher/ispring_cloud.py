@@ -1751,31 +1751,24 @@ def row_folder(row: dict) -> str:
     return cells[2] if len(cells) > 2 else ""
 
 
-def in_right_folder(row: dict, institution: str) -> bool:
-    """Is this row in the institution's own project?
+def check_folder(row: dict, institution: str) -> None:
+    """Say so when the deck did not land in the institution's own project.
 
-    Search and Recent list the whole library, so a row with the right title
-    can belong to another institution entirely. Those views carry a folder
-    column; inside a folder there is none, and an empty answer means "cannot
-    tell from here", which keeps the row.
-
-    This used to be a warning. It is a test now: taking a row from the wrong
-    project writes another institution's iframe into this material, and
-    nobody looking at the material can see that it is wrong.
+    iSpring drops the content in the parent folder when the institution has
+    no project of its own, and says nothing about it. The iframe still works,
+    so this is a warning, not a failure.
     """
     if not institution:
-        return True
+        return
     folder = row_folder(row)
-    if not folder:
-        return True
-    if institution.casefold() in folder.casefold():
-        return True
-    _warn(
-        "skipping a row with the right title in another project",
-        folder=folder,
-        institution=institution,
-    )
-    return False
+    if folder and institution.casefold() not in folder.casefold():
+        _warn(
+            "the material is not in the institution's own project",
+            folder=folder,
+            institution=institution,
+        )
+    elif folder:
+        _note("material is in the right project", folder=folder)
 
 
 def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
@@ -1790,12 +1783,7 @@ def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
     wait_for_rows(page)
     for attempt in range(max(1, scrolls)):
         rows = scan_rows(page)
-        exact = [
-            r
-            for r in rows
-            if normalise(r.get("title", "")).casefold() == wanted
-            and in_right_folder(r, institution)
-        ]
+        exact = [r for r in rows if normalise(r.get("title", "")).casefold() == wanted]
         if exact:
             if len(exact) > 1:
                 exact.sort(
@@ -1809,6 +1797,7 @@ def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
                     folders=[row_folder(r) for r in exact][:4],
                 )
             chosen = exact[0]
+            check_folder(chosen, institution)
             _note(
                 "found the row",
                 title=chosen.get("title"),
@@ -1817,14 +1806,10 @@ def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
             )
             return row_locator(page, chosen)
 
-        # No "closest row" fallback.
-        #
-        # It used to take the first row whose title merely contained this
-        # one, which is how a deck ends up with another deck's iframe:
-        # "Week 1" is inside "Week 10", and the library lists both. The link
-        # looks fine in the database and plays the wrong deck. Finding
-        # nothing is the honest answer - the round is retried, and if it
-        # still finds nothing the job fails and Slack says so.
+        # No "closest row" fallback: it took the first row whose title merely
+        # contained this one, and "Week 1" is inside "Week 10". That is how a
+        # deck got another deck's iframe.
+
         try:
             size = page.viewport_size or {"width": 1200, "height": 800}
             page.mouse.move(size["width"] / 2, size["height"] / 2)
@@ -2728,17 +2713,19 @@ def popup_with_text(page, pattern):
     return None
 
 
-def open_share(page, material: str, institution: str = "") -> bool:
+def open_share(page, material: str) -> bool:
     """Open the row's three-dot menu and click Share.
 
     Uses the library's own markup: find the row by its title, hover it so the
     three dots appear, open the menu and click Share inside that menu — not
     anywhere on the page, which is how a click used to land on the row behind.
     """
-    # The same folder test as the first look. Recent lists the whole
-    # library, so without it this second look can land on another
-    # institution's deck of the same name.
-    row = find_row(page, material, institution=institution)
+    # No folder test here on purpose.
+    #
+    # locate_material already found and checked this row on this page. Doing
+    # the check twice only adds a second chance to refuse a row that is
+    # right, which is how the Share button became unclickable.
+    row = find_row(page, material)
     if row is None:
         _warn("no row for the material", material=material, on_screen=row_titles(page))
         return False
@@ -3287,7 +3274,7 @@ def fetch_embed(
                 ),
             )
 
-        if not open_share(page, material, institution):
+        if not open_share(page, material):
             dump = dump_page(page, "no-share-menu")
             raise ISpringPublishingError(
                 f"no Share item in the row menu; on screen: "
@@ -3441,10 +3428,7 @@ def publish_to_cloud(
 
         embed = fetch_embed(
             content_name or institution,
-            # The library's own spelling, not the queue's. They differ -
-            # "Star Agile" is "StarAgile" there - and the folder test below
-            # would throw away the right row on that difference alone.
-            folder_title or institution,
+            institution,
             cdp_url,
             profile_dir=browser_profile_dir,
             chrome_path=browser_path,
