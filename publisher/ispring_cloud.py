@@ -140,11 +140,19 @@ UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "20"))
 # while the tree loads its hundreds of folders.
 # Three sweeps of a branch take longer than one look ever did.
 PICKER_SEARCH_S = float(os.environ.get("ISPRING_PICKER_WAIT", "150"))
-# Wheel notches to wind the page back to the top of an opened branch.
-SWEEP_UP_TURNS = int(os.environ.get("ISPRING_SWEEP_UP", "60"))
-# How far down to step between looks, and how many steps make one sweep.
+# One pass crosses the branch in one direction. Four of them is up, down,
+# up, down - and every one of them looks at each step, so a row the page had
+# not drawn yet on the way past gets another chance on the way back.
+SWEEP_PASSES = int(os.environ.get("ISPRING_SWEEP_PASSES", "4"))
+# Wheel notches per step, and steps per pass. 50 steps of 5 notches is about
+# 750 lines, more than the longest branch.
 SWEEP_STEP = int(os.environ.get("ISPRING_SWEEP_STEP", "5"))
-SWEEP_STEPS = int(os.environ.get("ISPRING_SWEEP_STEPS", "120"))
+SWEEP_STEPS = int(os.environ.get("ISPRING_SWEEP_STEPS", "50"))
+# Pause after each step, and a longer one when the direction turns round.
+# The rows are not in the control tree until they are drawn, so looking
+# while the page is still drawing reads an empty screen.
+SWEEP_PAUSE_S = float(os.environ.get("ISPRING_SWEEP_PAUSE", "0.2"))
+SWEEP_SETTLE_S = float(os.environ.get("ISPRING_SWEEP_SETTLE", "1.5"))
 # Floor for how far to scroll the project list looking for a row.
 SCROLL_TURNS_MIN = int(os.environ.get("ISPRING_SCROLL_TURNS", "250"))
 # The chevron that opens a branch is drawn this far left of its label.
@@ -936,8 +944,8 @@ def choose_match(placed: Sequence[tuple], parents: Sequence[str], institution: s
     return [under[0][1]]
 
 
-def sweep_for(picker, institution: str, parents: Sequence[str], deadline: float) -> list:
-    """Look for the institution's row over the whole branch, top to bottom.
+def sweep_for(picker, institution: str, parents: Sequence[str]) -> list:
+    """Look for the institution's row by sweeping the branch up and down.
 
     Opening a branch leaves the page sitting at the bottom of it, and the
     tree is a web page in an embedded browser: only the rows drawn on screen
@@ -945,8 +953,9 @@ def sweep_for(picker, institution: str, parents: Sequence[str], deadline: float)
     it simply is not there yet - which is why a branch that plainly holds
     the folder kept coming back empty.
 
-    So the page is wound back to the top and walked down a few lines at a
-    time, looking at every step.
+    So the page is walked up, then down, then up, then down, looking at
+    every step. The passes are the budget, not a clock: a sweep that is cut
+    short halfway is the same miss all over again.
     """
     surface = picker_surface(picker)
 
@@ -963,28 +972,34 @@ def sweep_for(picker, institution: str, parents: Sequence[str], deadline: float)
     if matches:
         return matches
 
-    for _ in range(SWEEP_UP_TURNS):
-        try:
-            surface.wheel_mouse_input(wheel_dist=SWEEP_STEP)
-        except Exception:  # noqa: BLE001
-            break
-    matches = look()
-    if matches:
-        _note("found at the top of the branch", institution=institution)
-        return matches
-
-    for step in range(SWEEP_STEPS):
-        if time.monotonic() >= deadline:
-            break
-        try:
-            surface.wheel_mouse_input(wheel_dist=-SWEEP_STEP)
-        except Exception:  # noqa: BLE001
-            break
-        time.sleep(0.2)
-        matches = look()
-        if matches:
-            _note("found on the way down", institution=institution, steps=step + 1)
-            return matches
+    for number in range(1, max(1, SWEEP_PASSES) + 1):
+        # Odd passes go up, even ones come back down.
+        up = number % 2 == 1
+        _note(
+            "sweeping the branch",
+            institution=institution,
+            pass_no=number,
+            going="up" if up else "down",
+        )
+        time.sleep(SWEEP_SETTLE_S)
+        for step in range(max(1, SWEEP_STEPS)):
+            try:
+                surface.wheel_mouse_input(
+                    wheel_dist=SWEEP_STEP if up else -SWEEP_STEP
+                )
+            except Exception:  # noqa: BLE001
+                return []
+            time.sleep(SWEEP_PAUSE_S)
+            matches = look()
+            if matches:
+                _note(
+                    "found it",
+                    institution=institution,
+                    pass_no=number,
+                    going="up" if up else "down",
+                    steps=step + 1,
+                )
+                return matches
     return []
 
 
@@ -1053,7 +1068,7 @@ def pick_project(dialog, institution: str, parent_folders: Sequence[str]) -> Non
     rounds = 0
     while time.monotonic() < deadline:
         rounds += 1
-        matches = sweep_for(picker, institution, parents, deadline)
+        matches = sweep_for(picker, institution, parents)
         if matches:
             break
         # The tree is still filling itself in. Wait, then sweep again.
