@@ -153,8 +153,11 @@ SWEEP_STEPS = int(os.environ.get("ISPRING_SWEEP_STEPS", "50"))
 # while the page is still drawing reads an empty screen.
 SWEEP_PAUSE_S = float(os.environ.get("ISPRING_SWEEP_PAUSE", "0.2"))
 SWEEP_SETTLE_S = float(os.environ.get("ISPRING_SWEEP_SETTLE", "1.5"))
-# Floor for how far to scroll the project list looking for a row.
-SCROLL_TURNS_MIN = int(os.environ.get("ISPRING_SCROLL_TURNS", "250"))
+# Turns in the first leg of bringing a row on screen. The legs after it go
+# the other way and twice as far, so the row is passed whichever side of the
+# view it started on.
+SCROLL_TURNS_MIN = int(os.environ.get("ISPRING_SCROLL_TURNS", "60"))
+SCROLL_PAUSE_S = float(os.environ.get("ISPRING_SCROLL_PAUSE", "0.15"))
 # The chevron that opens a branch is drawn this far left of its label.
 CHEVRON_OFFSET = int(os.environ.get("ISPRING_CHEVRON_OFFSET", "70"))
 
@@ -767,26 +770,38 @@ def scroll_into_view(control, picker):
     # dialog pane it scrolls nothing, and the row stays sizeless however
     # many turns are spent on it.
     surface = picker_surface(picker)
-    # 80 turns was set when the tree held one parent. With both open it holds
-    # 340 + 138 folders, and three lines a turn does not get to the bottom —
-    # the row is there, the scroll just stops short, and the error says the
-    # project was never found. Scale it to what is actually on screen.
-    turns = max(SCROLL_TURNS_MIN, len(picker.descendants()) // 2)
-    for turn in range(turns):
-        try:
-            surface.wheel_mouse_input(wheel_dist=-3)
-        except Exception as exc:  # noqa: BLE001
-            raise ISpringPublishingError(
-                f"could not scroll the project list: {exc}",
-                user_message=USER_PUBLISH_FAILED,
-            ) from exc
-        time.sleep(0.25)
-        rect = visible_rect(control)
-        if rect is not None:
-            _note("scrolled project row into view", wheel_turns=turn + 1)
-            return rect
+    # Down, then up, then down again.
+    #
+    # This used to scroll down only. The search leaves the page wherever it
+    # happened to find the row, and a row sitting just above the view can
+    # never be reached by scrolling further down - 250 turns later the error
+    # said the row never appeared, when it was a few lines up all along.
+    #
+    # The legs after the first go twice as far, so whichever side of the
+    # view the row started on, one of them passes it.
+    turns = max(1, SCROLL_TURNS_MIN)
+    legs = ((-3, turns), (3, turns * 2), (-3, turns * 2))
+    for wheel, length in legs:
+        going = "up" if wheel > 0 else "down"
+        for turn in range(length):
+            try:
+                surface.wheel_mouse_input(wheel_dist=wheel)
+            except Exception as exc:  # noqa: BLE001
+                raise ISpringPublishingError(
+                    f"could not scroll the project list: {exc}",
+                    user_message=USER_PUBLISH_FAILED,
+                ) from exc
+            time.sleep(SCROLL_PAUSE_S)
+            rect = visible_rect(control)
+            if rect is not None:
+                _note(
+                    "scrolled project row into view",
+                    going=going,
+                    wheel_turns=turn + 1,
+                )
+                return rect
     raise ISpringPublishingError(
-        f"scrolled {turns} turns and the row never appeared",
+        f"scrolled down and up {turns * 5} turns and the row never appeared",
         user_message=USER_PUBLISH_FAILED,
     )
 
