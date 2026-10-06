@@ -138,7 +138,13 @@ OFF_RE = re.compile(r"^\s*off\s*$", re.I)
 UPLOAD_SETTLE_S = float(os.environ.get("ISPRING_UPLOAD_WAIT", "20"))
 # How long to keep looking for the institution in the project picker
 # while the tree loads its hundreds of folders.
-PICKER_SEARCH_S = float(os.environ.get("ISPRING_PICKER_WAIT", "45"))
+# Three sweeps of a branch take longer than one look ever did.
+PICKER_SEARCH_S = float(os.environ.get("ISPRING_PICKER_WAIT", "150"))
+# Wheel notches to wind the page back to the top of an opened branch.
+SWEEP_UP_TURNS = int(os.environ.get("ISPRING_SWEEP_UP", "60"))
+# How far down to step between looks, and how many steps make one sweep.
+SWEEP_STEP = int(os.environ.get("ISPRING_SWEEP_STEP", "5"))
+SWEEP_STEPS = int(os.environ.get("ISPRING_SWEEP_STEPS", "120"))
 # Floor for how far to scroll the project list looking for a row.
 SCROLL_TURNS_MIN = int(os.environ.get("ISPRING_SCROLL_TURNS", "250"))
 # The chevron that opens a branch is drawn this far left of its label.
@@ -700,6 +706,26 @@ def choose_cloud_destination(dialog) -> None:
     )
 
 
+def picker_surface(picker):
+    """The embedded Internet Explorer pane the project tree is drawn in.
+
+    A wheel event has to land on this pane. Sent to the dialog around it,
+    nothing scrolls at all.
+    """
+    for pane in picker.descendants(control_type="Pane"):
+        try:
+            class_name = (pane.element_info.class_name or "").lower()
+        except Exception:  # noqa: BLE001
+            class_name = ""
+        if "internet explorer_server" in class_name:
+            return pane
+    for pane in picker.descendants(control_type="Pane"):
+        rect = visible_rect(pane)
+        if rect is not None and rect.height() > 200:
+            return pane
+    return picker
+
+
 def scroll_into_view(control, picker):
     """Get a project row on screen: ask nicely first, then scroll the list."""
     rect = visible_rect(control)
@@ -732,22 +758,7 @@ def scroll_into_view(control, picker):
     # A wheel event has to land on the IE pane itself. Sent to the outer
     # dialog pane it scrolls nothing, and the row stays sizeless however
     # many turns are spent on it.
-    surface = None
-    for pane in picker.descendants(control_type="Pane"):
-        try:
-            class_name = (pane.element_info.class_name or "").lower()
-        except Exception:  # noqa: BLE001
-            class_name = ""
-        if "internet explorer_server" in class_name:
-            surface = pane
-            break
-    if surface is None:
-        for pane in picker.descendants(control_type="Pane"):
-            pane_rect = visible_rect(pane)
-            if pane_rect is not None and pane_rect.height() > 200:
-                surface = pane
-                break
-    surface = surface or picker
+    surface = picker_surface(picker)
     # 80 turns was set when the tree held one parent. With both open it holds
     # 340 + 138 folders, and three lines a turn does not get to the bottom —
     # the row is there, the scroll just stops short, and the error says the
@@ -925,6 +936,58 @@ def choose_match(placed: Sequence[tuple], parents: Sequence[str], institution: s
     return [under[0][1]]
 
 
+def sweep_for(picker, institution: str, parents: Sequence[str], deadline: float) -> list:
+    """Look for the institution's row over the whole branch, top to bottom.
+
+    Opening a branch leaves the page sitting at the bottom of it, and the
+    tree is a web page in an embedded browser: only the rows drawn on screen
+    are in the control tree at all. A folder above the fold is not missing,
+    it simply is not there yet - which is why a branch that plainly holds
+    the folder kept coming back empty.
+
+    So the page is wound back to the top and walked down a few lines at a
+    time, looking at every step.
+    """
+    surface = picker_surface(picker)
+
+    def look() -> list:
+        return choose_match(
+            [(ancestor_label(control, parents), control)
+             for control in find_named(picker, institution)],
+            parents,
+            institution,
+        )
+
+    # Already on screen? Then nothing has to move.
+    matches = look()
+    if matches:
+        return matches
+
+    for _ in range(SWEEP_UP_TURNS):
+        try:
+            surface.wheel_mouse_input(wheel_dist=SWEEP_STEP)
+        except Exception:  # noqa: BLE001
+            break
+    matches = look()
+    if matches:
+        _note("found at the top of the branch", institution=institution)
+        return matches
+
+    for step in range(SWEEP_STEPS):
+        if time.monotonic() >= deadline:
+            break
+        try:
+            surface.wheel_mouse_input(wheel_dist=-SWEEP_STEP)
+        except Exception:  # noqa: BLE001
+            break
+        time.sleep(0.2)
+        matches = look()
+        if matches:
+            _note("found on the way down", institution=institution, steps=step + 1)
+            return matches
+    return []
+
+
 def pick_project(dialog, institution: str, parent_folders: Sequence[str]) -> None:
     """Select the institution's folder, looking only under ``parent_folders``.
 
@@ -970,31 +1033,30 @@ def pick_project(dialog, institution: str, parent_folders: Sequence[str]) -> Non
     if resolved:
         parents = resolved
 
+    # Open the branch once, not once a round.
+    #
+    # The chevron is a toggle. Pressing it again on an open branch closes
+    # it, and the rows that were there go with it - so a loop that
+    # re-expands every round spends half its rounds looking at a shut
+    # branch. Open it here, then only look.
+    for parent in parents:
+        outcome = expand_branch(picker, parent)
+        _note(
+            "project branch",
+            branch=parent,
+            outcome=outcome,
+            rows=len(picker.descendants()),
+        )
+
     matches = []
     deadline = time.monotonic() + PICKER_SEARCH_S
     rounds = 0
     while time.monotonic() < deadline:
         rounds += 1
-        for parent in parents:
-            outcome = expand_branch(picker, parent)
-            # Every parent, every round. If one of them never opens, this is
-            # the line that says so — and a parent that never opens is a
-            # parent whose institutions cannot be found.
-            _note(
-                "project branch",
-                branch=parent,
-                outcome=outcome,
-                round=rounds,
-                rows=len(picker.descendants()),
-            )
-        matches = choose_match(
-            [(ancestor_label(control, parents), control)
-             for control in find_named(picker, institution)],
-            parents,
-            institution,
-        )
+        matches = sweep_for(picker, institution, parents, deadline)
         if matches:
             break
+        # The tree is still filling itself in. Wait, then sweep again.
         time.sleep(2)
 
     if matches and rounds > 1:
@@ -1674,24 +1736,31 @@ def row_folder(row: dict) -> str:
     return cells[2] if len(cells) > 2 else ""
 
 
-def check_folder(row: dict, institution: str) -> None:
-    """Say so when the deck did not land in the institution's own project.
+def in_right_folder(row: dict, institution: str) -> bool:
+    """Is this row in the institution's own project?
 
-    iSpring drops the content in the parent folder when the institution has
-    no project of its own, and says nothing about it. The iframe still works,
-    so this is a warning, not a failure.
+    Search and Recent list the whole library, so a row with the right title
+    can belong to another institution entirely. Those views carry a folder
+    column; inside a folder there is none, and an empty answer means "cannot
+    tell from here", which keeps the row.
+
+    This used to be a warning. It is a test now: taking a row from the wrong
+    project writes another institution's iframe into this material, and
+    nobody looking at the material can see that it is wrong.
     """
     if not institution:
-        return
+        return True
     folder = row_folder(row)
-    if folder and institution.casefold() not in folder.casefold():
-        _warn(
-            "the material is not in the institution's own project",
-            folder=folder,
-            institution=institution,
-        )
-    elif folder:
-        _note("material is in the right project", folder=folder)
+    if not folder:
+        return True
+    if institution.casefold() in folder.casefold():
+        return True
+    _warn(
+        "skipping a row with the right title in another project",
+        folder=folder,
+        institution=institution,
+    )
+    return False
 
 
 def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
@@ -1706,7 +1775,12 @@ def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
     wait_for_rows(page)
     for attempt in range(max(1, scrolls)):
         rows = scan_rows(page)
-        exact = [r for r in rows if normalise(r.get("title", "")).casefold() == wanted]
+        exact = [
+            r
+            for r in rows
+            if normalise(r.get("title", "")).casefold() == wanted
+            and in_right_folder(r, institution)
+        ]
         if exact:
             if len(exact) > 1:
                 exact.sort(
@@ -1720,7 +1794,6 @@ def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
                     folders=[row_folder(r) for r in exact][:4],
                 )
             chosen = exact[0]
-            check_folder(chosen, institution)
             _note(
                 "found the row",
                 title=chosen.get("title"),
@@ -1729,12 +1802,14 @@ def find_row(page, name: str, scrolls: int = 12, institution: str = ""):
             )
             return row_locator(page, chosen)
 
-        loose = [r for r in rows if wanted and wanted in normalise(r.get("title", "")).casefold()]
-        if loose:
-            _note("no exact title; using the closest row", title=loose[0].get("title"))
-            check_folder(loose[0], institution)
-            return row_locator(page, loose[0])
-
+        # No "closest row" fallback.
+        #
+        # It used to take the first row whose title merely contained this
+        # one, which is how a deck ends up with another deck's iframe:
+        # "Week 1" is inside "Week 10", and the library lists both. The link
+        # looks fine in the database and plays the wrong deck. Finding
+        # nothing is the honest answer - the round is retried, and if it
+        # still finds nothing the job fails and Slack says so.
         try:
             size = page.viewport_size or {"width": 1200, "height": 800}
             page.mouse.move(size["width"] / 2, size["height"] / 2)
@@ -2638,14 +2713,17 @@ def popup_with_text(page, pattern):
     return None
 
 
-def open_share(page, material: str) -> bool:
+def open_share(page, material: str, institution: str = "") -> bool:
     """Open the row's three-dot menu and click Share.
 
     Uses the library's own markup: find the row by its title, hover it so the
     three dots appear, open the menu and click Share inside that menu — not
     anywhere on the page, which is how a click used to land on the row behind.
     """
-    row = find_row(page, material)
+    # The same folder test as the first look. Recent lists the whole
+    # library, so without it this second look can land on another
+    # institution's deck of the same name.
+    row = find_row(page, material, institution=institution)
     if row is None:
         _warn("no row for the material", material=material, on_screen=row_titles(page))
         return False
@@ -3194,7 +3272,7 @@ def fetch_embed(
                 ),
             )
 
-        if not open_share(page, material):
+        if not open_share(page, material, institution):
             dump = dump_page(page, "no-share-menu")
             raise ISpringPublishingError(
                 f"no Share item in the row menu; on screen: "
@@ -3348,7 +3426,10 @@ def publish_to_cloud(
 
         embed = fetch_embed(
             content_name or institution,
-            institution,
+            # The library's own spelling, not the queue's. They differ -
+            # "Star Agile" is "StarAgile" there - and the folder test below
+            # would throw away the right row on that difference alone.
+            folder_title or institution,
             cdp_url,
             profile_dir=browser_profile_dir,
             chrome_path=browser_path,
