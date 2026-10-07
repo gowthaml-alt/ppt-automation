@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     backend_base_url: str = ""
 
-    poll_interval_seconds: int = 30
+    poll_interval_seconds: int = 120
 
     # Private-server institutions run their own copy of the backend, so their
     # queue lives on their own host. Same two APIs, same token, just a slower
@@ -43,6 +43,11 @@ class Settings(BaseSettings):
             "https://mcgrawhill-api.edmingle.com/nuSource/api/v1",
             "https://mitsde-api.edmingle.com/nuSource/api/v1",
             "https://vyoma-api.edmingle.com/nuSource/api/v1",
+            # TransUnion / CIBIL. These three use the portal host itself, not
+            # a separate -api host like the six above.
+            "https://learn.cibilsaksham.com/nuSource/api/v1",
+            "https://opsacademy.cibilsaksham.com/nuSource/api/v1",
+            "https://tuoperations-fte.edmingle.com/nuSource/api/v1",
         ]
     )
     private_poll_interval_seconds: int = 600

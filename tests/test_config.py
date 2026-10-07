@@ -30,7 +30,7 @@ def test_defaults_are_safe(monkeypatch):
     assert s.ispring_adapter == "not_configured"
     assert s.storage_backend == "local_fs"
     assert s.keep_failed_job_files is False
-    assert s.poll_interval_seconds == 30
+    assert s.poll_interval_seconds == 120
     assert s.max_ppt_size_mb == 500
     assert s.download_allowed_hosts == []
     assert "ppt_worker_token" not in s.model_fields
