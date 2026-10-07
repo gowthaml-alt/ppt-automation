@@ -47,7 +47,7 @@ class Settings(BaseSettings):
             # a separate -api host like the six above.
             "https://learn.cibilsaksham.com/nuSource/api/v1",
             "https://opsacademy.cibilsaksham.com/nuSource/api/v1",
-            "https://tuoperations-fte.edmingle.com/nuSource/api/v1",
+            "https://tuoperations-api.edmingle.com/nuSource/api/v1",
         ]
     )
     private_poll_interval_seconds: int = 600

@@ -52,6 +52,11 @@ logger = logging.getLogger(__name__)
 # away gets a half-dead process rather than a new one.
 POWERPOINT_RESTART_WAIT_S = 5
 
+# How many times to open the publish dialog before giving up. Each try
+# after the first gets a freshly started PowerPoint, so the project
+# picker is new, closed and scrolled to the top.
+PUBLISH_TRIES = 3
+
 CHUNK_SIZE = 64 * 1024
 OOXML_MAGIC = b"PK\x03\x04"  # .pptx and friends
 OLE_MAGIC = b"\xd0\xcf\x11\xe0"  # the old binary .ppt
@@ -440,67 +445,87 @@ def run_cloud_job(
                 cloud_url=settings.ispring_cloud_url,
             )
 
-        try:
-            result: CloudPublishResult = publish_once(in_use)
-        except ProjectMissingError:
-            # A new institution: nobody has made it a folder yet. Make one and
-            # publish again. Once only — if the folder is still not in the
-            # picker after that, something is wrong that another round of the
-            # same will not fix.
-            logger.info(
-                "no folder for this institution yet; creating one",
-                extra={
-                    "stage": "ispring_publish",
-                    "institution": institution_name,
-                    "parent": settings.ispring_new_institution_parent,
-                },
-            )
-            made = ensure_project_folder(
-                institution_name,
-                settings.ispring_new_institution_parent,
-                settings.ispring_chrome_cdp_url,
-                profile_dir=settings.ispring_chrome_profile_dir,
-                chrome_path=settings.ispring_chrome_path,
-                cloud_url=settings.ispring_cloud_url,
-            )
-            # "already there" and "just made it" look identical from the
-            # picker's side when the second attempt fails, and they point at
-            # completely different problems. Say which one happened.
-            logger.info(
-                "folder created" if made else
-                "the folder was already in the library, so the picker not "
-                "seeing it is not about it being missing",
-                extra={
-                    "stage": "ispring",
-                    "institution": institution_name,
-                    "parent": settings.ispring_new_institution_parent,
-                    # Not "created": logging reserves that name for the
-                    # record's own timestamp and raises if you reuse it.
-                    "folder_created": bool(made),
-                },
-            )
-
-            # PowerPoint has to be restarted before it can see the folder.
-            #
-            # The Suite add-in reads the cloud tree once, when it first talks
-            # to iSpring, and keeps it for the life of the process. A folder
-            # created a minute ago is simply not in the picker it is holding,
-            # so publishing again in the same PowerPoint fails exactly the
-            # same way. Quitting and reopening is what makes it look again.
-            logger.info(
-                "restarting PowerPoint so it can see the new folder",
-                extra={"stage": "ispring_publish", "institution": institution_name},
-            )
+        # Three goes at the publish dialog, each with a fresh PowerPoint.
+        #
+        # 1st: as it is. If the institution has no folder yet, make one.
+        # 2nd: PowerPoint restarted. The Suite add-in reads the cloud tree
+        #      once when it starts and keeps it, so a folder made a minute
+        #      ago is simply not in the picker it is holding.
+        # 3rd: PowerPoint restarted again. The picker is a web view, and a
+        #      new process gives a new one - closed, and at the top. A
+        #      chevron click that missed last time gets a clean one.
+        #
+        # After that, stop. Another round of the same will not help.
+        result = None
+        folder_ensured = False
+        for attempt in range(1, PUBLISH_TRIES + 1):
             try:
-                service.quit()
-            except Exception:  # noqa: BLE001
-                logger.warning("PowerPoint did not close cleanly", exc_info=True)
-            service = None
-            time.sleep(POWERPOINT_RESTART_WAIT_S)
+                result = publish_once(in_use)
+                break
+            except ProjectMissingError:
+                if attempt == PUBLISH_TRIES:
+                    raise
+                if not folder_ensured:
+                    logger.info(
+                        "no folder for this institution yet; creating one",
+                        extra={
+                            "stage": "ispring_publish",
+                            "institution": institution_name,
+                            "parent": settings.ispring_new_institution_parent,
+                        },
+                    )
+                    made = ensure_project_folder(
+                        institution_name,
+                        settings.ispring_new_institution_parent,
+                        settings.ispring_chrome_cdp_url,
+                        profile_dir=settings.ispring_chrome_profile_dir,
+                        chrome_path=settings.ispring_chrome_path,
+                        cloud_url=settings.ispring_cloud_url,
+                    )
+                    folder_ensured = True
+                    # "already there" and "just made it" look identical from
+                    # the picker's side when the next attempt fails, and they
+                    # point at completely different problems.
+                    logger.info(
+                        "folder created" if made else
+                        "the folder was already in the library, so the picker "
+                        "not seeing it is not about it being missing",
+                        extra={
+                            "stage": "ispring",
+                            "institution": institution_name,
+                            "parent": settings.ispring_new_institution_parent,
+                            # Not "created": logging reserves that name for
+                            # the record's own timestamp and raises on reuse.
+                            "folder_created": bool(made),
+                        },
+                    )
+                else:
+                    logger.info(
+                        "the folder is in the library but the picker did not "
+                        "show it; starting PowerPoint again for a fresh picker",
+                        extra={
+                            "stage": "ispring_publish",
+                            "institution": institution_name,
+                            "attempt": attempt,
+                        },
+                    )
 
-            service, in_use, prompts = open_with_repair(deck, settings)
-            repaired = repaired or in_use != deck or prompts > 0
-            result = publish_once(in_use)
+                logger.info(
+                    "restarting PowerPoint",
+                    extra={
+                        "stage": "ispring_publish",
+                        "institution": institution_name,
+                        "attempt": attempt,
+                    },
+                )
+                try:
+                    service.quit()
+                except Exception:  # noqa: BLE001
+                    logger.warning("PowerPoint did not close cleanly", exc_info=True)
+                service = None
+                time.sleep(POWERPOINT_RESTART_WAIT_S)
+                service, in_use, prompts = open_with_repair(deck, settings)
+                repaired = repaired or in_use != deck or prompts > 0
         published = True
     finally:
         # PowerPoint has to let go of the file before it can be deleted.

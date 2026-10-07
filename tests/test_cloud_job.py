@@ -311,18 +311,23 @@ def test_a_missing_folder_is_created_and_the_deck_published(monkeypatch, tmp_pat
 
 
 def test_the_folder_is_created_once_not_in_a_loop(monkeypatch, tmp_path):
-    """Still missing after creating it: give up rather than go round again."""
+    """Three goes at the picker, but the folder is only ever created once."""
     import worker.cloud_job as job
     from utils.exceptions import ProjectMissingError
 
     attempts = []
+    creations = []
 
     def _publish(pptx, **kwargs):
         attempts.append(kwargs)
         raise ProjectMissingError("no folder", institution="Brand New College")
 
+    def _ensure(*a, **k):
+        creations.append(a)
+        return True
+
     monkeypatch.setattr(job, "publish_to_cloud", _publish)
-    monkeypatch.setattr(job, "ensure_project_folder", lambda *a, **k: True)
+    monkeypatch.setattr(job, "ensure_project_folder", _ensure)
     monkeypatch.setattr(job, "inspect", lambda _p: False)
     monkeypatch.setattr(job, "open_with_repair", lambda deck, _s: (None, deck, 0))
 
@@ -338,4 +343,8 @@ def test_the_folder_is_created_once_not_in_a_loop(monkeypatch, tmp_path):
             institution_name="Brand New College",
             settings=_settings(tmp_path),
         )
-    assert len(attempts) == 2
+    # Each try after the first gets a fresh PowerPoint, so the picker is
+    # new, closed and at the top - a chevron click that missed gets another.
+    assert len(attempts) == job.PUBLISH_TRIES
+    # But making the folder again would just make a second folder.
+    assert len(creations) == 1

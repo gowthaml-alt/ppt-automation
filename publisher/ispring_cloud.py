@@ -148,7 +148,7 @@ SWEEP_PASSES = int(os.environ.get("ISPRING_SWEEP_PASSES", "4"))
 # Wheel notches per step, and steps per pass. 50 steps of 5 notches is about
 # 750 lines, more than the longest branch.
 SWEEP_STEP = int(os.environ.get("ISPRING_SWEEP_STEP", "5"))
-SWEEP_STEPS = int(os.environ.get("ISPRING_SWEEP_STEPS", "50"))
+SWEEP_STEPS = int(os.environ.get("ISPRING_SWEEP_STEPS", "20"))
 # Pause after each step, and a longer one when the direction turns round.
 # The rows are not in the control tree until they are drawn, so looking
 # while the page is still drawing reads an empty screen.
