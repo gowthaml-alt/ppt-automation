@@ -157,3 +157,55 @@ def test_artifact_run_creates_a_timestamped_directory(tmp_path):
     assert log_path.exists()
     assert "opened chrome" in log_path.read_text(encoding="utf-8")
 
+
+
+# The institution -> folder map. "PPT migration New" is searched first; this
+# file is what says where an older institution's folder actually sits.
+
+def _map_file(tmp_path, monkeypatch, data):
+    import json
+
+    from publisher import ispring_cloud
+
+    target = tmp_path / "institution_folders.json"
+    target.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(ispring_cloud, "FOLDER_MAP_PATH", target)
+    return target
+
+
+def test_the_map_answers_whatever_the_case(tmp_path, monkeypatch):
+    from publisher.ispring_cloud import remembered_folder
+
+    _map_file(tmp_path, monkeypatch,
+              {"star agile": {"parent": "PPT Migration", "folder": "StarAgile"}})
+    assert remembered_folder("Star Agile") == ("PPT Migration", "StarAgile")
+
+
+def test_an_institution_not_in_the_map_gives_nothing(tmp_path, monkeypatch):
+    from publisher.ispring_cloud import remembered_folder
+
+    _map_file(tmp_path, monkeypatch, {})
+    assert remembered_folder("Acme") == ("", "")
+
+
+def test_a_missing_map_file_is_not_an_error(tmp_path, monkeypatch):
+    from publisher import ispring_cloud
+
+    monkeypatch.setattr(ispring_cloud, "FOLDER_MAP_PATH", tmp_path / "gone.json")
+    assert ispring_cloud.remembered_folder("Acme") == ("", "")
+
+
+def test_a_new_folder_is_written_back_without_losing_the_rest(tmp_path, monkeypatch):
+    import json
+
+    from publisher.ispring_cloud import remember_folder, remembered_folder
+
+    target = _map_file(
+        tmp_path, monkeypatch,
+        {"star agile": {"parent": "PPT Migration", "folder": "StarAgile"}},
+    )
+    remember_folder("Acme", "PPT migration New", "Acme")
+    assert remembered_folder("Acme") == ("PPT migration New", "Acme")
+    # The entry that was already there is still there.
+    assert remembered_folder("Star Agile") == ("PPT Migration", "StarAgile")
+    assert len(json.loads(target.read_text(encoding="utf-8"))) == 2

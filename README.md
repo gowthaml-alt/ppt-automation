@@ -48,6 +48,27 @@ PHP queue  --GET /next-->  Windows poller  --POST /result-->  PHP
 One OS process. One job at a time. Never `GET /next` again until the current
 job has `POST /result`.
 
+### Where a deck goes
+
+`ISPRING_PARENT_FOLDERS` is now one folder: **PPT migration New**. The order
+is:
+
+1. Ask the library for the institution's folder under **PPT migration New**.
+   Found - publish there.
+2. Not found - read `config/institution_folders.json`. It says which parent
+   that institution's folder is under (most of the older ones are under
+   **PPT Migration**). Ask the library there and publish into it.
+3. Not in either - create the folder under **PPT migration New**, publish,
+   and write the new entry into the JSON.
+
+So only one branch of the picker is ever opened, and the map keeps itself up
+to date. The file was seeded from the October library listing: 463 entries,
+338 under PPT Migration and 125 under PPT migration New. Folders sitting in
+the account's default project were left out on purpose - publishing into the
+default project is what put decks in "Edmingle Learning Content".
+
+Set `ISPRING_FOLDER_MAP` to point the map somewhere else.
+
 ### Private servers
 
 Six institutions run their own copy of the backend, so their queue is on their

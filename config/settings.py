@@ -79,11 +79,12 @@ class Settings(BaseSettings):
     # vba and cli were removed: probing the installed Suite 11 showed the
     # add-in has no automation object, no macro entry and no command line.
     ispring_adapter: Literal["not_configured", "fake", "uia"] = "not_configured"
-    # The folders in iSpring Cloud that hold one folder per institution.
-    # Both are searched: institutions were split across the two over time,
-    # and 4 names exist under both. The first one listed wins a clash.
+    # The folder in iSpring Cloud that holds one folder per institution.
+    # Only this one is searched. Institutions whose folder sits elsewhere
+    # are listed in config/institution_folders.json, and that file names the
+    # one extra branch to open - instead of opening both every time.
     ispring_parent_folders: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["PPT Migration", "PPT migration New"]
+        default_factory=lambda: ["PPT migration New"]
     )
     # Where a folder is created for an institution that has none.
     ispring_new_institution_parent: str = "PPT migration New"

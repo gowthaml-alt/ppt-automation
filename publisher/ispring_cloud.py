@@ -20,6 +20,7 @@ desktop, and interface automation stops working there.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import base64
 import os
@@ -2961,6 +2962,57 @@ def cloud_page(
         yield page
 
 
+# The institution -> folder map. "PPT migration New" is searched first; this
+# file says where an institution's folder is when it is not there.
+FOLDER_MAP_PATH = Path(
+    os.environ.get("ISPRING_FOLDER_MAP")
+    or Path(__file__).resolve().parents[1] / "config" / "institution_folders.json"
+)
+
+
+def _folder_map() -> dict:
+    """The map, read fresh each time. A missing file is not an error."""
+    try:
+        with FOLDER_MAP_PATH.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def remembered_folder(institution: str) -> tuple[str, str]:
+    """Where this institution's folder was last seen: (parent, folder)."""
+    entry = _folder_map().get(normalise(institution).lower())
+    if not isinstance(entry, dict):
+        return "", ""
+    return str(entry.get("parent") or ""), str(entry.get("folder") or "")
+
+
+def remember_folder(institution: str, parent: str, folder: str) -> None:
+    """Write this institution's folder into the map, when it is new or changed.
+
+    So a folder created today is found straight away tomorrow, without
+    anyone editing the file by hand.
+    """
+    key = normalise(institution).lower()
+    if not key or not parent or not folder:
+        return
+    data = _folder_map()
+    entry = {"parent": parent, "folder": folder}
+    if data.get(key) == entry:
+        return
+    data[key] = entry
+    try:
+        FOLDER_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with FOLDER_MAP_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1, ensure_ascii=False, sort_keys=True)
+        _note("folder map updated", institution=institution,
+              parent=parent, folder=folder)
+    except OSError as exc:  # noqa: BLE001
+        # Not worth failing a published deck over.
+        _warn("could not write the folder map", error=str(exc))
+
+
 def locate_institution(
     institution: str,
     parents,
@@ -3369,14 +3421,29 @@ def publish_to_cloud(
     # has to open every parent and scroll through hundreds of rows to find
     # out — and if the answer is "nowhere", it has done all of that to learn
     # the one thing that could have been known up front.
+    # "PPT migration New" first, because that is where new folders are made.
+    # If the institution is not there, the map says where its folder really
+    # is - the older ones sit under "PPT Migration" - so only that one extra
+    # branch is opened instead of searching both every time.
+    search_in = [folder for folder in parent_folders if folder]
+    known_parent, _ = remembered_folder(institution)
+    if known_parent and known_parent not in search_in:
+        search_in.append(known_parent)
+        _note("the map puts this institution elsewhere",
+              institution=institution, parent=known_parent)
+
     holder, folder_title = locate_institution(
         institution,
-        parent_folders,
+        search_in,
         cdp_url,
         profile_dir=browser_profile_dir,
         chrome_path=browser_path,
         cloud_url=cloud_url,
     )
+    if holder:
+        # Keep the map true, so a folder created today is found at once
+        # tomorrow and nobody has to edit the file by hand.
+        remember_folder(institution, holder, folder_title)
     if not holder:
         raise ProjectMissingError(
             f"no folder for {institution!r} in {list(parent_folders)}",
