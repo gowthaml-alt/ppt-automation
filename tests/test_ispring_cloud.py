@@ -209,3 +209,56 @@ def test_a_new_folder_is_written_back_without_losing_the_rest(tmp_path, monkeypa
     # The entry that was already there is still there.
     assert remembered_folder("Star Agile") == ("PPT Migration", "StarAgile")
     assert len(json.loads(target.read_text(encoding="utf-8"))) == 2
+
+
+# An institution called "testing" has decks called "testing" in it. The
+# search returns both, and only the folder may be opened.
+
+def test_a_folder_row_is_recognised_by_its_type():
+    from publisher.ispring_cloud import is_folder_row
+
+    assert is_folder_row({"title": "testing", "cells": ["testing", "Folder"]}) is True
+
+
+def test_a_deck_with_the_folders_name_is_not_a_folder():
+    from publisher.ispring_cloud import is_folder_row
+
+    row = {"title": "testing", "cells": ["testing", "Presentation", "PPT Migration"]}
+    assert is_folder_row(row) is False
+
+
+def test_a_row_with_no_type_cell_is_taken_as_a_folder():
+    from publisher.ispring_cloud import is_folder_row
+
+    # Better to try opening it than to refuse every row because the library
+    # did not write the word "Folder" anywhere.
+    assert is_folder_row({"title": "testing", "cells": ["testing"]}) is True
+
+
+# Read off the live library: there is no folder column. The path is in the
+# same cell as the title, and the cells after it are type, date and owner.
+
+LIVE_DECK = {
+    "title": "testing",
+    "cells": ["testing PPT Migration / Demoacademy", "Presentation",
+              "Sep 16, 2026, 6:24 PM", "You"],
+}
+LIVE_FOLDER = {
+    "title": "testing",
+    "cells": ["testing PPT migration New", "Folder",
+              "Oct 7, 2026, 4:03 PM", "You"],
+}
+
+
+def test_the_folder_is_read_off_the_title_cell():
+    from publisher.ispring_cloud import row_folder
+
+    assert row_folder(LIVE_DECK) == "PPT Migration / Demoacademy"
+    assert row_folder(LIVE_FOLDER) == "PPT migration New"
+
+
+def test_the_live_rows_are_told_apart_by_type():
+    from publisher.ispring_cloud import is_folder_row
+
+    assert is_folder_row(LIVE_DECK) is False
+    assert is_folder_row(LIVE_FOLDER) is True

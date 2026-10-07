@@ -1759,12 +1759,28 @@ def row_modified(row: dict):
 
 
 def row_folder(row: dict) -> str:
-    """The project/folder cell, which iSpring writes as "Parent / Child"."""
-    for cell in row.get("cells", []):
-        if "/" in cell:
-            return cell
+    """Where this row lives, read off the row itself.
+
+    There is no separate folder column. The library puts the path into the
+    same cell as the title, so the first cell reads
+
+        "testing PPT Migration / Demoacademy"
+
+    and the folder is whatever is left once the title is taken off the
+    front. The cells after it are the type, the date and the owner - which
+    is why reading "the third cell" used to return a date, and why any cell
+    with a slash in it used to return the title as well.
+
+    Empty when the row does not say, which means "cannot tell from here".
+    """
     cells = row.get("cells", [])
-    return cells[2] if len(cells) > 2 else ""
+    if not cells:
+        return ""
+    first = normalise(cells[0])
+    title = normalise(row.get("title", ""))
+    if title and first.casefold().startswith(title.casefold()):
+        return first[len(title):].strip()
+    return ""
 
 
 def check_folder(row: dict, institution: str) -> None:
@@ -1911,8 +1927,52 @@ def visible_row_labels(page, limit: int = 25) -> list[str]:
     return labels[:limit]
 
 
+PROJECT_LIST = '[data-at="id=project-list"]'
+PROJECT_TITLE = '[data-at="id=title"]'
+
+
+def open_project(page, project: str) -> bool:
+    """Click a project in the left-hand list.
+
+    The library's own way in. Read off the live page, the panel is
+
+        <div data-at="id=project-list">
+          <div data-at="id=<projectId>;state=edit">
+            <div data-at="id=title">PPT migration New</div>
+
+    and clicking that title goes to /app/s?s=project/<id>/<rootFolder>,
+    listing the institution folders inside it.
+
+    This beats searching for the project's name: a search for "testing"
+    returns the folder and every deck called "testing" as well.
+    """
+    wanted = normalise(project).casefold()
+    for frame in _frames(page):
+        try:
+            items = frame.locator(f"{PROJECT_LIST} {PROJECT_TITLE}")
+            count = items.count()
+        except Exception:  # noqa: BLE001
+            continue
+        for index in range(count):
+            item = items.nth(index)
+            try:
+                if normalise(item.inner_text()).casefold() != wanted:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            if safe_click(item, f"project {project}"):
+                page.wait_for_timeout(2500)
+                _note("opened the project", project=project)
+                return True
+    _warn("project not in the left-hand list", project=project)
+    return False
+
+
 def enter_folder(page, folder: str) -> bool:
-    row = scroll_hunt(page, folder)
+    # The folder, by its type - not the first thing with the right name.
+    row = folder_row(page, folder)
+    if row is None:
+        row = scroll_hunt(page, folder)
     if row is None:
         return False
     try:
@@ -2526,28 +2586,66 @@ def search_library(page, term: str) -> bool:
     return False
 
 
-def open_result(page, name: str) -> bool:
-    """Click a row in the search results to open it.
+NOT_A_FOLDER = {"presentation", "quiz", "video", "course", "page", "audio"}
 
-    Searching for the institution returns its folder, not the material inside
-    it, so the folder has to be opened before the material can be found.
+
+def is_folder_row(row: dict) -> bool:
+    """Does this row describe a folder rather than a deck?
+
+    An institution called "testing" has decks called "testing" in it too.
+    Searching the library returns both, and opening a deck instead of the
+    folder leaves the search inside a presentation, looking for itself.
+
+    The type cell says "Folder" where the library writes one. Where it does
+    not, anything that calls itself a presentation, quiz or video certainly
+    is not a folder, and the rest is taken as one.
     """
-    pattern = re.compile(re.escape(name), re.I)
-    for frame in _frames(page):
-        row = visible_or_none(frame.get_by_text(pattern))
-        if row is None:
+    cells = [normalise(cell).casefold() for cell in row.get("cells", [])]
+    if any(cell == "folder" for cell in cells):
+        return True
+    return not any(cell in NOT_A_FOLDER for cell in cells)
+
+
+def folder_row(page, name: str):
+    """A handle on the row that is the folder of this name, or None."""
+    wanted = normalise(name).casefold()
+    wait_for_rows(page)
+    for row in scan_rows(page):
+        if normalise(row.get("title", "")).casefold() != wanted:
             continue
-        for action in ("click", "dblclick"):
-            try:
-                getattr(row, action)(timeout=4000)
-                page.wait_for_timeout(2500)
-                _note("opened search result", name=name, how=action)
-                return True
-            except Exception:  # noqa: BLE001
-                continue
-        if safe_click(row, f"search result {name}"):
+        if not is_folder_row(row):
+            _note("skipping a deck with the folder's name", name=name)
+            continue
+        return row_locator(page, row)
+    return None
+
+
+def open_result(page, name: str) -> bool:
+    """Open the institution's folder from the search results.
+
+    Searching for the institution returns its folder, not the material
+    inside it, so the folder has to be opened first - and it must be the
+    folder, not a deck that happens to share the name.
+    """
+    row = folder_row(page, name)
+    if row is None:
+        _warn(
+            "no folder with this name in the search results",
+            name=name,
+            on_screen=row_titles(page, limit=10),
+        )
+        return False
+    for action in ("dblclick", "click"):
+        try:
+            getattr(row, action)(timeout=4000)
             page.wait_for_timeout(2500)
+            _note("opened the institution folder", name=name, how=action)
             return True
+        except Exception:  # noqa: BLE001
+            continue
+    if safe_click(row, f"folder {name}"):
+        page.wait_for_timeout(2500)
+        return True
     return False
 
 
@@ -2623,20 +2721,29 @@ def go_library(page, cloud_url: str = "") -> bool:
 
 
 def locate_material(
-    page, material: str, institution: str, cloud_url: str = "", rounds: int = 3
+    page,
+    material: str,
+    institution: str,
+    cloud_url: str = "",
+    rounds: int = 3,
+    parent: str = "",
 ) -> bool:
     """Find the deck **inside the institution's own folder**.
 
-    Only two routes count, and both of them prove where the deck is:
+    Three routes prove where the deck is, and a fourth is the last resort:
 
-    1. search for the **institution**, open the folder that comes back, and
-       find the deck inside it;
-    2. walk the library into that folder and find the deck inside it.
+    1. search for the **institution** and open the folder that comes back;
+    2. click the project in the left-hand list, then open that folder;
+    3. walk the library from the top into that folder.
 
-    Searching by the deck's name, or taking it from Recent, would find it
+    Searching by the deck's name is never accepted: it finds the deck
     wherever it sits - including "Edmingle Learning Content", which is what
-    the publish dialog is pre-filled with. Accepting those is how a deck in
-    the wrong folder got its link saved and nobody could see anything wrong.
+    the publish dialog comes pre-filled with, and accepting that is how a
+    deck in the wrong folder got its link saved with nothing looking wrong.
+
+    Recent is the fourth and last route. The newest row there is the deck
+    just published, so it is the right deck; it proves nothing about the
+    folder, so the folder it really went to is written to the log.
 
     Every round starts by loading the page again. A tab open since before
     the publish shows an old list, and iSpring Cloud takes a little while to
@@ -2651,12 +2758,36 @@ def locate_material(
                       folder=institution, round=round_no)
                 return True
 
-        # 2. The same folder, reached by hand instead of by search.
+        # 2. The same folder, through the left-hand project list. This is
+        # what a person does when the search comes back empty: pick the
+        # project on the left, then the institution's folder inside it.
+        if institution and parent and open_project(page, parent):
+            if enter_folder(page, institution) and find_row(page, material, institution=institution) is not None:
+                _note("found it through the project list",
+                      project=parent, folder=institution)
+                return True
+
+        # 3. The same folder, walking the library from the top.
         if institution:
             go_library(page, cloud_url)
             if enter_folder(page, institution) and find_row(page, material, institution=institution) is not None:
                 _note("found it by walking the library", folder=institution)
                 return True
+
+        # 4. Recent, last of all. The newest row there is the deck that was
+        # just published, so it is the right deck - but it says nothing
+        # about which folder the deck went into. Rare, and better than
+        # failing a deck that did publish, so it is taken and the folder it
+        # really landed in is written to the log.
+        if go_recent(page, cloud_url) and find_row(page, material, institution=institution) is not None:
+            _warn(
+                "found it in Recent, not in the institution's folder",
+                material=material,
+                institution=institution,
+                folder=found_elsewhere(page, material, cloud_url) or "(not named)",
+                round=round_no,
+            )
+            return True
 
         _warn(
             "not in the institution folder yet",
@@ -2673,8 +2804,9 @@ def locate_material(
 def found_elsewhere(page, material: str, cloud_url: str = "") -> str:
     """Where the deck actually landed, for the error message.
 
-    Used only to explain a failure, never to accept one. Search by name
-    first, then Recent - the newest row there is the one just published.
+    Used to explain a failure, and to say in the log where a deck found
+    through Recent actually went. Search by name first, then Recent - the
+    newest row there is the one just published.
     """
     wanted = normalise(material).casefold()
     for route in ("name", "recent"):
@@ -3285,6 +3417,7 @@ def fetch_embed(
     chrome_path: str = "",
     cloud_url: str = "https://harshit.ispring.com/",
     cover_title: str = "",
+    parent: str = "",
 ) -> str:
     """Drive the Chrome that is already running and already signed in.
 
@@ -3346,7 +3479,9 @@ def fetch_embed(
         if dump_always():
             dump_page(page, "library")
 
-        if not locate_material(page, material, institution, cloud_url=cloud_url):
+        if not locate_material(
+            page, material, institution, cloud_url=cloud_url, parent=parent
+        ):
             elsewhere = found_elsewhere(page, material, cloud_url)
             dump = dump_page(page, "material-not-found")
             if elsewhere:
@@ -3543,6 +3678,7 @@ def publish_to_cloud(
             chrome_path=browser_path,
             cloud_url=cloud_url,
             cover_title=cover_title,
+            parent=holder,
         )
     finally:
         if window is not None:
