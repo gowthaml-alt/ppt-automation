@@ -2625,42 +2625,33 @@ def go_library(page, cloud_url: str = "") -> bool:
 def locate_material(
     page, material: str, institution: str, cloud_url: str = "", rounds: int = 3
 ) -> bool:
-    """Find the just-published material's row.
+    """Find the deck **inside the institution's own folder**.
 
-    The way that works, in this order:
+    Only two routes count, and both of them prove where the deck is:
 
-    1. search for the **institution**, open the folder the search returns,
-       and scroll down it until the material appears;
-    2. search for the material by name;
-    3. Recent, where the newest sits at the top;
-    4. walk the library by hand.
+    1. search for the **institution**, open the folder that comes back, and
+       find the deck inside it;
+    2. walk the library into that folder and find the deck inside it.
 
-    Every round starts by loading the page again. A tab that has been open
-    since before the publish shows an old list, and iSpring Cloud takes a
-    little while to list a material anyway — so a round that finds nothing
-    waits and looks again rather than failing.
+    Searching by the deck's name, or taking it from Recent, would find it
+    wherever it sits - including "Edmingle Learning Content", which is what
+    the publish dialog is pre-filled with. Accepting those is how a deck in
+    the wrong folder got its link saved and nobody could see anything wrong.
+
+    Every round starts by loading the page again. A tab open since before
+    the publish shows an old list, and iSpring Cloud takes a little while to
+    list a material anyway - so a round that finds nothing waits and looks
+    again rather than failing.
     """
     for round_no in range(1, max(1, rounds) + 1):
-        # 1. Search for the institution and open the folder it returns, then
-        # look inside it. This is the route to prefer when the project exists.
+        # 1. Search for the institution and open the folder it returns.
         if institution and search_library(page, institution):
             if open_result(page, institution) and find_row(page, material, institution=institution) is not None:
                 _note("found it in the institution folder",
                       folder=institution, round=round_no)
                 return True
 
-        # 2. Search for the material itself.
-        if search_library(page, material) and find_row(page, material, institution=institution) is not None:
-            _note("found it by name", material=material, round=round_no)
-            return True
-
-        # 3. Recent: the newest is at the top. A deck that went to the parent
-        # folder because the institution has no project of its own is here.
-        if go_recent(page, cloud_url) and find_row(page, material, institution=institution) is not None:
-            _note("found it in Recent", material=material, round=round_no)
-            return True
-
-        # 4. No search at all: open the folder from the list and scroll.
+        # 2. The same folder, reached by hand instead of by search.
         if institution:
             go_library(page, cloud_url)
             if enter_folder(page, institution) and find_row(page, material, institution=institution) is not None:
@@ -2668,14 +2659,39 @@ def locate_material(
                 return True
 
         _warn(
-            "not listed yet",
+            "not in the institution folder yet",
             material=material,
+            institution=institution,
             round=round_no,
             on_screen=row_titles(page, limit=15) or visible_row_labels(page, limit=10),
         )
         if round_no < rounds:
             page.wait_for_timeout(10000)
     return False
+
+
+def found_elsewhere(page, material: str, cloud_url: str = "") -> str:
+    """Where the deck actually landed, for the error message.
+
+    Used only to explain a failure, never to accept one. Search by name
+    first, then Recent - the newest row there is the one just published.
+    """
+    wanted = normalise(material).casefold()
+    for route in ("name", "recent"):
+        try:
+            found = (
+                search_library(page, material)
+                if route == "name"
+                else go_recent(page, cloud_url)
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if not found:
+            continue
+        for row in scan_rows(page):
+            if normalise(row.get("title", "")).casefold() == wanted:
+                return row_folder(row) or "(the list did not name a folder)"
+    return ""
 
 
 COVER_RE = re.compile(r"edit cover image", re.I)
@@ -3331,7 +3347,18 @@ def fetch_embed(
             dump_page(page, "library")
 
         if not locate_material(page, material, institution, cloud_url=cloud_url):
+            elsewhere = found_elsewhere(page, material, cloud_url)
             dump = dump_page(page, "material-not-found")
+            if elsewhere:
+                raise ISpringPublishingError(
+                    f"{material!r} is not in the {institution!r} folder; it is "
+                    f"in {elsewhere!r} (url {page.url}); "
+                    f"browser dump: {dump or 'none'}",
+                    user_message=(
+                        f"The deck was published into {elsewhere} instead of the "
+                        f"{institution!r} folder, so its link was not saved."
+                    ),
+                )
             raise ISpringPublishingError(
                 f"{material!r} was not found in the library (url {page.url}); "
                 f"browser dump: {dump or 'none'}",
