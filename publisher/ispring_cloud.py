@@ -1988,10 +1988,14 @@ def open_project(page, project: str) -> bool:
 
 
 def enter_folder(page, folder: str) -> bool:
-    # The folder, by its type - not the first thing with the right name.
-    row = folder_row(page, folder)
-    if row is None:
-        row = scroll_hunt(page, folder)
+    # The folder's title link, by its type - not the first thing with the
+    # right name, and not the row, which only selects.
+    title = folder_row(page, folder)
+    if title is not None and safe_click(title, f"folder {folder}"):
+        page.wait_for_timeout(2500)
+        _note("opened folder", folder=folder)
+        return True
+    row = scroll_hunt(page, folder)
     if row is None:
         return False
     try:
@@ -2626,16 +2630,29 @@ def is_folder_row(row: dict) -> bool:
 
 
 def folder_row(page, name: str):
-    """A handle on the row that is the folder of this name, or None."""
+    """The folder's **title link**, or None.
+
+    The title, not the row. Clicking the row only ticks its checkbox; the
+    title is an <a data-at="id=content-item-title"> and clicking that is
+    what opens the folder. Checked against the live library: clicking the
+    title moved the page to /app/s?s=project/<project>/<folder>.
+    """
     wanted = normalise(name).casefold()
     wait_for_rows(page)
     for row in scan_rows(page):
         if normalise(row.get("title", "")).casefold() != wanted:
             continue
         if not is_folder_row(row):
-            _note("skipping a deck with the folder's name", name=name)
+            _note("skipping a deck with the folder's name", folder=name)
             continue
-        return row_locator(page, row)
+        locator = row_locator(page, row)
+        try:
+            title = locator.locator(TITLE_SELECTOR).first
+            if title.count():
+                return title
+        except Exception:  # noqa: BLE001
+            pass
+        return locator
     return None
 
 
@@ -2650,15 +2667,15 @@ def open_result(page, name: str) -> bool:
     if row is None:
         _warn(
             "no folder with this name in the search results",
-            name=name,
+            folder=name,
             on_screen=row_titles(page, limit=10),
         )
         return False
-    for action in ("dblclick", "click"):
+    for action in ("click", "dblclick"):
         try:
             getattr(row, action)(timeout=4000)
             page.wait_for_timeout(2500)
-            _note("opened the institution folder", name=name, how=action)
+            _note("opened the institution folder", folder=name, how=action)
             return True
         except Exception:  # noqa: BLE001
             continue
