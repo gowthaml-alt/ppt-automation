@@ -173,14 +173,33 @@ class CloudPublishResult:
     elapsed_s: float
 
 
+# Names logging puts on every record itself. Passing one through extra=
+# raises KeyError, in the middle of a job, after the deck has published.
+# It has cost us two live runs: "created" once and "name" once.
+RESERVED_LOG_FIELDS = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "message", "module",
+    "msecs", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "taskName", "thread", "threadName",
+})
+
+
+def _safe_fields(fields: dict) -> dict:
+    """Rename anything logging already owns, instead of raising."""
+    return {
+        (f"{key}_" if key in RESERVED_LOG_FIELDS else key): value
+        for key, value in fields.items()
+    }
+
+
 def _note(event: str, **fields) -> None:
     # The parameter is named 'event', not 'message': a caller logging a field
     # called message would otherwise collide with it and raise TypeError.
-    logger.info(event, extra={"stage": STAGE, **fields})
+    logger.info(event, extra={"stage": STAGE, **_safe_fields(fields)})
 
 
 def _warn(event: str, **fields) -> None:
-    logger.warning(event, extra={"stage": STAGE, **fields})
+    logger.warning(event, extra={"stage": STAGE, **_safe_fields(fields)})
 
 
 def ensure_com() -> None:

@@ -262,3 +262,15 @@ def test_the_live_rows_are_told_apart_by_type():
 
     assert is_folder_row(LIVE_DECK) is False
     assert is_folder_row(LIVE_FOLDER) is True
+
+
+def test_a_field_logging_already_owns_does_not_blow_up(caplog):
+    """'name' and 'created' belong to LogRecord; passing one used to raise."""
+    from publisher.ispring_cloud import _note
+
+    with caplog.at_level("INFO"):
+        _note("looking for a folder", name="testing", created=True, folder="x")
+    record = caplog.records[-1]
+    assert record.name_ == "testing"
+    assert record.created_ is True
+    assert record.folder == "x"
